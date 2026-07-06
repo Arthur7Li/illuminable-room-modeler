@@ -95,14 +95,3 @@ The easiest free option is **Vercel** or **Netlify**, both of which auto-detect 
 1. Repo owner: go to **Settings → Collaborators → Add people**, invite teammates by GitHub username/email with **Write** access.
 2. Collaborators: accept the email invite, then clone and install as shown above.
 3. Recommended workflow: create a feature branch before editing (`git checkout -b your-feature-name`), push it, and open a Pull Request into `main` instead of committing directly to `main`.
-
-## Core Concepts (Quick Reference)
-
-- `reflectPoint(p, p1, p2)` — mirrors a point across a line using linear algebra; the core function behind every bounce.
-- `baseTriangle` — builds the starting triangle from coordinate or angle+length input (Law of Sines).
-- `rayData` — casts a single ray and computes each reflected triangle via edge-intersection math (Cramer's rule).
-- `codeData` — parses a numeric billiard code into a sequence of triangle reflections using parity rules and Law of Cosines angle-matching.
-
-## License
-
-Add a license of your choice (e.g. MIT) via GitHub's **Add file → Create new file → LICENSE** template picker.
