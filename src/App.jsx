@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity } from 'lucide-react';
+import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle } from 'lucide-react';
 
 // Academic color palette: distinct but slightly muted/professional tones
 const COLORS = [
@@ -355,10 +355,110 @@ export default function App() {
   const labelsMap = codeData.idxToAngle || {0: 'x', 1: 'y', 2: 'z'};
 
   // Extracted constants to prevent repeated calculation overhead inside rendering logic
-  const startA = baseTriangle.points[0];
-  const finalA = activeTriangles.length > 0 ? activeTriangles[activeTriangles.length - 1].points[0] : startA;
-  const lineDx = finalA.x - startA.x;
-  const lineDy = finalA.y - startA.y;
+  const getVertexForSymbol = (symbol, fallback) => {
+    const match = Object.entries(labelsMap).find(([, label]) => label === symbol);
+    return match ? Number(match[0]) : fallback;
+  };
+  const xVertexIdx = getVertexForSymbol('x', 0);
+  const yVertexIdx = getVertexForSymbol('y', 1);
+  const zVertexIdx = getVertexForSymbol('z', 2);
+  const startX = baseTriangle.points[xVertexIdx] || baseTriangle.points[0];
+  const finalX = activeTriangles.length > 0 ? activeTriangles[activeTriangles.length - 1].points[xVertexIdx] : startX;
+  const lineDx = finalX.x - startX.x;
+  const lineDy = finalX.y - startX.y;
+  const lineLength = Math.hypot(lineDx, lineDy);
+  const lineSideTolerance = Math.max(1e-10, lineLength * Math.max(1, lineLength) * 1e-10);
+  const getLineSide = (p) => lineDx * (p.y - startX.y) - lineDy * (p.x - startX.x);
+  const getFanPointValidation = (p, symbol) => {
+    if (simulatorMode !== 'code' || activeTriangles.length === 0 || lineLength < 1e-12) {
+      return null;
+    }
+
+    const expectedSide = symbol === 'y' ? 1 : symbol === 'z' ? -1 : 0;
+    if (expectedSide === 0) return null;
+
+    const side = getLineSide(p);
+    const valid = expectedSide > 0
+      ? side > lineSideTolerance
+      : side < -lineSideTolerance;
+
+    return {
+      side,
+      valid,
+      expected: expectedSide > 0 ? 'above' : 'below',
+      color: valid ? '#22c55e' : '#ef4444',
+      ring: valid ? '#14532d' : '#7f1d1d'
+    };
+  };
+
+  const fanValidation = useMemo(() => {
+    if (simulatorMode !== 'code' || activeTriangles.length === 0) {
+      return { status: 'idle', checked: 0, violations: [] };
+    }
+
+    if (lineLength < 1e-12) {
+      return {
+        status: 'invalid',
+        checked: 0,
+        violations: [{ triId: 'trajectory', symbol: 'x', expected: 'nonzero line', side: 0 }]
+      };
+    }
+
+    const allTris = [baseTriangle, ...activeTriangles];
+    const expectedVertices = [
+      { symbol: 'y', idx: yVertexIdx, side: 1, expected: 'above' },
+      { symbol: 'z', idx: zVertexIdx, side: -1, expected: 'below' }
+    ];
+
+    const seen = new Set();
+    const violations = [];
+    let checked = 0;
+
+    for (const tri of allTris) {
+      for (const expected of expectedVertices) {
+        const p = tri.points[expected.idx];
+        if (!p) continue;
+
+        const key = `${expected.symbol}:${p.x.toFixed(10)},${p.y.toFixed(10)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        checked++;
+        const side = lineDx * (p.y - startX.y) - lineDy * (p.x - startX.x);
+        const valid = expected.side > 0
+          ? side > lineSideTolerance
+          : side < -lineSideTolerance;
+
+        if (!valid && violations.length < 12) {
+          violations.push({
+            triId: tri.id,
+            symbol: expected.symbol,
+            expected: expected.expected,
+            side,
+            point: p
+          });
+        }
+      }
+    }
+
+    return {
+      status: violations.length === 0 ? 'valid' : 'invalid',
+      checked,
+      violations
+    };
+  }, [
+    simulatorMode,
+    activeTriangles,
+    baseTriangle,
+    yVertexIdx,
+    zVertexIdx,
+    lineLength,
+    lineSideTolerance,
+    lineDx,
+    lineDy,
+    startX.x,
+    startX.y
+  ]);
 
   // --- INTERACTION HANDLERS ---
   const handleMouseDown = (e) => {
@@ -434,18 +534,20 @@ export default function App() {
           </h1>
           <p className="text-[11px] font-medium text-slate-500 uppercase tracking-widest mb-5">Invisible Point Workbench</p>
           
-          <div className="flex gap-2">
+          <div className="grid grid-cols-2 gap-1 rounded-lg border border-white/10 bg-[#070b10] p-1">
             <button 
               onClick={() => setSimulatorMode('ray')}
-              className={`px-3 pb-3 text-sm font-semibold transition-all border-b-2 flex items-center gap-1.5 ${simulatorMode === 'ray' ? 'border-amber-300 text-amber-200' : 'border-transparent text-slate-500 hover:text-slate-200'}`}
+              title="Shoot one ray from a selected vertex."
+              className={`rounded-md px-3 py-2 text-sm font-semibold transition-all flex items-center justify-center gap-1.5 ${simulatorMode === 'ray' ? 'bg-amber-300/15 text-amber-100 shadow-sm' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'}`}
             >
-              <Zap className="w-4 h-4"/> Ray Sim
+              <Zap className="w-4 h-4"/> Trace Ray
             </button>
             <button 
               onClick={() => setSimulatorMode('code')}
-              className={`px-3 pb-3 text-sm font-semibold transition-all border-b-2 flex items-center gap-1.5 ${simulatorMode === 'code' ? 'border-cyan-300 text-cyan-200' : 'border-transparent text-slate-500 hover:text-slate-200'}`}
+              title="Unfold a space-separated integer code."
+              className={`rounded-md px-3 py-2 text-sm font-semibold transition-all flex items-center justify-center gap-1.5 ${simulatorMode === 'code' ? 'bg-cyan-300/15 text-cyan-100 shadow-sm' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'}`}
             >
-              <Code2 className="w-4 h-4"/> Code Sim
+              <Code2 className="w-4 h-4"/> Unfold Code
             </button>
           </div>
         </div>
@@ -460,8 +562,20 @@ export default function App() {
                 <Settings2 className="w-3.5 h-3.5"/> Base Geometry
               </h2>
               <div className="flex bg-[#0b1016] p-0.5 rounded-md border border-white/10">
-                <button onClick={() => setBaseInputMode('coords')} className={`px-2 py-1 text-[10px] font-bold rounded ${baseInputMode === 'coords' ? 'bg-cyan-400/15 text-cyan-100 shadow-sm' : 'text-slate-500 hover:text-slate-200'}`}>XY</button>
-                <button onClick={() => setBaseInputMode('angles')} className={`px-2 py-1 text-[10px] font-bold rounded ${baseInputMode === 'angles' ? 'bg-cyan-400/15 text-cyan-100 shadow-sm' : 'text-slate-500 hover:text-slate-200'}`}>Deg</button>
+                <button
+                  onClick={() => setBaseInputMode('coords')}
+                  title="Enter all three triangle vertices as coordinates."
+                  className={`px-2 py-1 text-[10px] font-bold rounded ${baseInputMode === 'coords' ? 'bg-cyan-400/15 text-cyan-100 shadow-sm' : 'text-slate-500 hover:text-slate-200'}`}
+                >
+                  Coordinates
+                </button>
+                <button
+                  onClick={() => setBaseInputMode('angles')}
+                  title="Enter two angles and a base length."
+                  className={`px-2 py-1 text-[10px] font-bold rounded ${baseInputMode === 'angles' ? 'bg-cyan-400/15 text-cyan-100 shadow-sm' : 'text-slate-500 hover:text-slate-200'}`}
+                >
+                  Angles
+                </button>
               </div>
             </div>
 
@@ -521,7 +635,14 @@ export default function App() {
                   <label className="text-[11px] font-bold text-slate-400 flex justify-between mb-1.5"><span>Origin Vertex</span></label>
                   <div className="flex gap-2">
                     {[0, 1, 2].map(v => (
-                      <button key={v} onClick={() => setRayStartVertex(v)} className={`flex-1 py-1.5 text-xs rounded-md font-bold border transition-colors ${rayStartVertex === v ? 'bg-amber-300/15 border-amber-300/40 text-amber-100' : 'bg-[#0b1016] border-white/10 text-slate-500 hover:text-slate-200 hover:border-slate-500/50'}`}>{['A', 'B', 'C'][v]}</button>
+                      <button
+                        key={v}
+                        onClick={() => setRayStartVertex(v)}
+                        title={`Start the ray at vertex ${['A', 'B', 'C'][v]}.`}
+                        className={`flex-1 py-1.5 text-xs rounded-md font-bold border transition-colors ${rayStartVertex === v ? 'bg-amber-300/15 border-amber-300/40 text-amber-100' : 'bg-[#0b1016] border-white/10 text-slate-500 hover:text-slate-200 hover:border-slate-500/50'}`}
+                      >
+                        Start {['A', 'B', 'C'][v]}
+                      </button>
                     ))}
                   </div>
                 </div>
@@ -561,26 +682,60 @@ export default function App() {
           {/* ANALYTICS & DATA LOGS */}
           <div className="px-3 pb-8">
             
-            {/* V0 TRAJECTORY (Always visible if active) */}
+            {/* X TRAJECTORY (Always visible if active) */}
             {activeTriangles.length > 0 && (
               <div className="mb-3 bg-[#151c24] p-4 rounded-lg border border-white/10 shadow-[0_8px_28px_rgba(0,0,0,0.22)]">
                 <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-3 flex items-center gap-1.5">
-                  <Compass className="w-3 h-3 text-cyan-300"/> Trajectory Analysis (A)
+                  <Compass className="w-3 h-3 text-cyan-300"/> Trajectory Analysis (x)
                 </h3>
                 <div className="flex flex-col gap-2">
                   <div className="flex justify-between items-center border-b border-white/10 pb-2">
-                    <span className="text-[11px] text-slate-500 font-medium">Final Coordinate</span>
+                    <span className="text-[11px] text-slate-500 font-medium">Final x Coordinate</span>
                     <span className="text-xs font-mono text-slate-100 font-semibold bg-[#0b1016] px-2 py-0.5 rounded border border-white/10">
-                      {finalA.x.toFixed(4)}, {finalA.y.toFixed(4)}
+                      {finalX.x.toFixed(4)}, {finalX.y.toFixed(4)}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-[11px] text-slate-500 font-medium">Global Angle <span className="font-mono text-[9px] text-slate-600 ml-1">atan2</span></span>
                     <span className="text-xs font-mono text-cyan-100 font-bold bg-cyan-400/10 px-2 py-0.5 rounded border border-cyan-300/20">
-                      {getGlobalAngle(startA, finalA).toFixed(6)}&deg;
+                      {getGlobalAngle(startX, finalX).toFixed(6)}&deg;
                     </span>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {simulatorMode === 'code' && activeTriangles.length > 0 && (
+              <div className={`mb-3 p-4 rounded-lg border shadow-[0_8px_28px_rgba(0,0,0,0.22)] ${fanValidation.status === 'valid' ? 'bg-emerald-500/10 border-emerald-300/25' : 'bg-red-500/10 border-red-300/25'}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-300 mb-2 flex items-center gap-1.5">
+                    {fanValidation.status === 'valid' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-300" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-red-300" />
+                    )}
+                    Fan Validator
+                  </h3>
+                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${fanValidation.status === 'valid' ? 'text-emerald-100 border-emerald-300/25 bg-emerald-400/10' : 'text-red-100 border-red-300/25 bg-red-400/10'}`}>
+                    {fanValidation.status === 'valid' ? 'VALID' : 'INVALID'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-400 leading-relaxed">
+                  Checked <span className="font-mono text-slate-200">{fanValidation.checked}</span> unique fan vertices:
+                  <span className="font-mono text-emerald-300"> y above</span>,
+                  <span className="font-mono text-emerald-300"> z below</span>.
+                </div>
+                {fanValidation.violations.length > 0 && (
+                  <div className="mt-3 space-y-1.5">
+                    {fanValidation.violations.slice(0, 3).map((violation, idx) => (
+                      <div key={`${violation.triId}-${violation.symbol}-${idx}`} className="rounded-md border border-red-300/20 bg-[#0b1016]/80 px-2 py-1.5 text-[10px] text-red-100">
+                        <span className="font-mono font-bold">{violation.triId}</span>
+                        <span className="font-mono"> {violation.symbol}</span> expected {violation.expected}; side =
+                        <span className="font-mono"> {violation.side.toExponential(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -659,8 +814,9 @@ export default function App() {
                 GENERATED: <span className="text-cyan-200 ml-2">{activeTriangles.length}</span>
              </div>
            )}
-          <button onClick={handleFitScreen} className="bg-[#101820]/95 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 p-2.5 rounded-md shadow-[0_8px_24px_rgba(0,0,0,0.32)] border border-white/10 transition-colors backdrop-blur" title="Fit to Screen">
+          <button onClick={handleFitScreen} className="bg-[#101820]/95 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 px-3 py-2.5 rounded-md shadow-[0_8px_24px_rgba(0,0,0,0.32)] border border-white/10 transition-colors backdrop-blur flex items-center gap-2 text-xs font-bold" title="Fit all generated triangles to the canvas.">
             <Maximize className="w-4 h-4" />
+            Fit
           </button>
         </div>
         
@@ -721,8 +877,8 @@ export default function App() {
               {simulatorMode === 'code' && activeTriangles.length > 0 && (
                 <g pointerEvents="none">
                   <line
-                    x1={startA.x} y1={startA.y}
-                    x2={finalA.x} y2={finalA.y}
+                    x1={startX.x} y1={startX.y}
+                    x2={finalX.x} y2={finalX.y}
                     stroke="#dc2626" strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round"
                   />
                 </g>
@@ -731,6 +887,65 @@ export default function App() {
 
             {/* UNSCALED SCREEN-SPACE ANNOTATIONS */}
             <g pointerEvents="none">
+              {simulatorMode === 'code' && activeTriangles.length > 0 && (() => {
+                const markers = [];
+                const seen = new Set();
+                const allTris = [baseTriangle, ...activeTriangles];
+
+                for (const tri of allTris) {
+                  for (const vertexIdx of [yVertexIdx, zVertexIdx]) {
+                    const symbol = labelsMap[vertexIdx];
+                    const p = tri.points[vertexIdx];
+                    if (!p || (symbol !== 'y' && symbol !== 'z')) continue;
+
+                    const key = `${symbol}:${p.x.toFixed(10)},${p.y.toFixed(10)}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+
+                    const validation = getFanPointValidation(p, symbol);
+                    if (!validation) continue;
+
+                    const cx = toSvgX(p.x);
+                    const cy = toSvgY(p.y);
+                    const radius = validation.valid ? 4 : 6;
+
+                    markers.push(
+                      <g key={`fan-mark-${key}`}>
+                        <circle
+                          cx={cx}
+                          cy={cy}
+                          r={radius + 2}
+                          fill={validation.ring}
+                          opacity={validation.valid ? 0.45 : 0.85}
+                        />
+                        <circle
+                          cx={cx}
+                          cy={cy}
+                          r={radius}
+                          fill={validation.color}
+                          opacity={validation.valid ? 0.78 : 1}
+                        />
+                        {!validation.valid && (
+                          <text
+                            x={cx}
+                            y={cy + 0.5}
+                            fill="#fff1f2"
+                            fontSize="8"
+                            fontWeight="900"
+                            textAnchor="middle"
+                            alignmentBaseline="middle"
+                            className="font-mono"
+                          >
+                            {symbol}
+                          </text>
+                        )}
+                      </g>
+                    );
+                  }
+                }
+
+                return markers;
+              })()}
               
               {/* Base Triangle Corner Variables (x, y, z) dynamically mapped */}
               {(() => {
@@ -809,27 +1024,26 @@ export default function App() {
                           renderedCoords.add(coordKey);
                           const vertexName = ['A', 'B', 'C'][i];
                           
-                          // Dynamic vertex coloring logic based on proximity to the central trajectory line
+                          // Dynamic vertex coloring logic based on the fan-side validator
                           let vColor = isDerived ? tri.color : '#e2e8f0';
                           let isStartOrFinal = false;
 
                           if (activeTriangles.length > 0) {
-                            const isStartA = tri.id === 'T0' && i === 0;
-                            const isFinalA = tri.id === activeTriangles[activeTriangles.length - 1].id && i === 0;
+                            const isStartX = tri.id === 'T0' && i === xVertexIdx;
+                            const isFinalX = tri.id === activeTriangles[activeTriangles.length - 1].id && i === xVertexIdx;
+                            const symbol = labelsMap[i];
+                            const fanPointValidation = getFanPointValidation(p, symbol);
                             
-                            if (isStartA || isFinalA) {
+                            if (isStartX || isFinalX) {
                               vColor = '#dc2626'; // Red for origin/final trajectory anchors
                               isStartOrFinal = true;
+                            } else if (fanPointValidation) {
+                              vColor = fanPointValidation.color;
                             } else {
-                              if (Math.abs(lineDx) > 1e-10) {
-                                const yLine = startA.y + (p.x - startA.x) * (lineDy / lineDx);
-                                if (p.y > yLine + 1e-8) vColor = '#2563eb'; // Blue for above the line mathematically
-                                else if (p.y < yLine - 1e-8) vColor = '#e5e7eb'; // Light mark for below the line on dark canvas
-                                else vColor = '#e5e7eb'; 
-                              } else {
-                                if (p.x < startA.x - 1e-8) vColor = '#2563eb';
-                                else vColor = '#e5e7eb';
-                              }
+                              const side = getLineSide(p);
+                              if (side > lineSideTolerance) vColor = '#38bdf8';
+                              else if (side < -lineSideTolerance) vColor = '#e5e7eb';
+                              else vColor = '#facc15';
                             }
                           }
 
