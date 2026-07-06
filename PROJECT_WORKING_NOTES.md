@@ -660,7 +660,10 @@ The output shown in the UI:
 - `parsedSequence`: each count with its symbolic angle label.
 - `sideSequence`: each actual side crossed/reflected, using side labels `1, 2, 3`.
 - `triangles`: reflected triangle copies.
-- final `A` coordinate and global angle from the original `A` to the final `A`.
+- final shot endpoint coordinate and global angle from the original physical `A`
+  to the final physical `A`. Under the default angle mapping this endpoint is
+  displayed as `z/A`, which is the intended first green vertex to ending green
+  vertex red line.
 
 ## Rendering And Interaction Algorithms
 
@@ -678,12 +681,17 @@ else:
 The app uses:
 
 ```text
-startA = baseTriangle.points[0]
-finalA = activeTriangles[last].points[0] if any reflected triangles exist else startA
-line = startA -> finalA
+shotVertexIdx = 0
+shotSymbol = labelsMap[shotVertexIdx]
+startShot = baseTriangle.points[shotVertexIdx]
+finalShot = activeTriangles[last].points[shotVertexIdx] if any reflected triangles exist else startShot
+line = startShot -> finalShot
 ```
 
-That line is the main visual trajectory proxy in code mode.
+That line is the main visual trajectory proxy in code mode. It is deliberately
+defined by the first green endpoint and the ending green endpoint, not by a
+symbolic `x -> x` convention. In the default conjecture-oriented setup,
+physical `A` carries symbolic label `z`, so the sidebar shows this as `z/A`.
 
 ### Fit To Screen
 

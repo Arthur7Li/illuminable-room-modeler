@@ -1,13 +1,20 @@
 <!doctype html>
+<!-- Declare the app as an English-language single-page document for browsers and assistive tooling. -->
 <html lang="en">
   <head>
+    <!-- Use UTF-8 so copied mathematical symbols and UI text are interpreted consistently. -->
     <meta charset="UTF-8" />
+    <!-- Point the browser tab icon at Vite's public static asset path. -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Keep the canvas and sidebar responsive on mobile and desktop viewport sizes. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Keep the title terse because the sidebar provides the descriptive app identity. -->
     <title>unfolder</title>
   </head>
   <body>
+    <!-- React mounts the entire workbench into this node. -->
     <div id="root"></div>
+    <!-- Vite serves this ES module directly in development and bundles it for production. -->
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
