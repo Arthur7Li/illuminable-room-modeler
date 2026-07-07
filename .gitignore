@@ -13,7 +13,7 @@ dist-ssr
 *.local
 
 # Local workspace artifacts
-.agents/
+agents/
 .repo-backups/
 
 # Editor directories and files
