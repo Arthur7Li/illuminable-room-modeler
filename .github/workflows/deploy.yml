@@ -1,0 +1,57 @@
+# Build the Vite app and publish the generated static files to GitHub Pages.
+name: Deploy to GitHub Pages
+
+# Deploy only when the main branch changes, with a manual button available in Actions.
+on:
+  push:
+    branches: ['main']
+  workflow_dispatch:
+
+# Pages deployment needs read access to the repo, Pages write access, and an OIDC token.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Cancel older in-progress Pages deploys when a newer commit is pushed.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+# Build and deploy the static Vite output.
+jobs:
+  deploy:
+    # GitHub Pages records the deployed URL on this environment.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # GitHub-hosted Linux runner is enough for this client-only app.
+    runs-on: ubuntu-latest
+    steps:
+      # Pull the repository contents into the runner.
+      - name: Checkout
+        uses: actions/checkout@v7
+      # Install a current long-term-support Node runtime and enable npm cache.
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+      # Install exactly the dependencies pinned by package-lock.json.
+      - name: Install dependencies
+        run: npm ci
+      # Produce the static dist/ folder that visitors will receive.
+      - name: Build
+        run: npm run build
+      # Configure Pages metadata for the deployment.
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+      # Upload dist/ as the artifact GitHub Pages will serve.
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./dist
+      # Publish the uploaded artifact and expose the resulting URL.
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
