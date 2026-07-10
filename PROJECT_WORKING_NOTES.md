@@ -690,15 +690,20 @@ finalShot = activeTriangles[last].points[shotVertexIdx] if any reflected triangl
 line = startShot -> finalShot
 ```
 
-That vector is the main visual trajectory proxy in code mode. The validator does
-not infer top/bottom roles from the literal line through these two endpoints.
-Instead it uses this vector as the direction for the paper's tower separation
-test. In the default conjecture-oriented setup, physical `A` carries symbolic
-label `z`, so the sidebar shows this vector as `z/A`.
+That line is the main visual trajectory proxy in code mode. The validator uses
+the literal line through these two endpoints and evaluates it at each candidate
+vertex x coordinate. In the default conjecture-oriented setup, physical `A`
+carries symbolic label `z`, so the sidebar shows this vector as `z/A`.
 
-### Tower Separation Validation
+### Finite Tower Line Validation
 
-The validator follows the unfolding-tower rules from `Obtuse Billiards.pdf`:
+The validator follows finite unfolding-poolshot rules adapted from
+`Obtuse Billiards.pdf`. The paper is primarily about periodic paths, but this app
+does not use the periodic XYZ equation or the CS/CNS/OSO/ONS/OSNO classification
+machinery. It borrows the finite tower-coloring and fan philosophy, then applies
+the direct line-side predicate requested for this exploratory workbench.
+
+The tower-coloring rule is:
 
 1. `A0` is formal blue.
 2. `B0` is formal black, rendered red in this UI.
@@ -715,54 +720,81 @@ Occurrences are keyed by triangle id, physical vertex index, and symbolic label,
 so physical `C` vertices are tracked even when their coordinates move under angle
 perturbation.
 
-For a shot vector `w = finalShot - startShot`, each vertex point `p` receives a
-determinant score:
+Every numeric code block is also checked as one finite fan. If a block is
+`count` and its symbolic angle is `s`, then the fan central angle is:
 
 ```text
-score(p) = det(p, w) = p.x * w.y - p.y * w.x
+centralAngle = count * actualAngle(s)
 ```
 
-The paper's pairwise condition `det(red - blue, w) > 0` for every blue/red pair
-is equivalent to:
+The finite poolshot fan condition used here is:
 
 ```text
-min(score(red vertices)) > max(score(blue vertices)) + tolerance
+centralAngle < 180 degrees
 ```
 
-The epsilon input is a perpendicular-distance tolerance in mathematical units.
-The implementation multiplies it by the shot-vector length so it can compare in
-determinant units. A tiny floating-point floor remains in place so exact-boundary
-tests are not dominated by roundoff.
+The inspector reports the maximum central angle over all code blocks as
+`max fan`, so the active code numbers can be compared directly against the
+current triangle angles.
+
+For the endpoint line from `startShot` to `finalShot`, each vertex point `p`
+receives a direct line comparison:
+
+```text
+slope = (finalShot.y - startShot.y) / (finalShot.x - startShot.x)
+lineY(p.x) = startShot.y + slope * (p.x - startShot.x)
+dy(p) = p.y - lineY(p.x)
+```
+
+The current all-vertex condition is:
+
+```text
+blue vertices: dy(p) > epsilon
+red vertices:  dy(p) < -epsilon
+```
+
+The epsilon input is applied directly in y-coordinate units. A tiny
+floating-point floor remains in place so exact-boundary tests are not dominated
+by roundoff. Vertical shot lines are rejected in this iteration because
+`lineY(x)` is undefined for them; that case can receive a separate x-side
+predicate later if needed.
 
 Endpoint coordinates are not skipped for coloring or display. They are, however,
 ignored as obstruction contributors because the visual shot definitionally starts
 and ends at those singular coordinates. This prevents the final `A` occurrence
 from invalidating its own shot while still allowing all non-endpoint `A`, `B`,
-and `C` occurrences to participate in the determinant margin.
+and `C` occurrences to participate in the line-side test.
 
 Pseudocode:
 
 ```text
 function validateShot(baseTriangle, activeTriangles, labelsMap, epsilon):
-    shotVector = final physical A - first physical A
-    tolerance = max(1e-12, length(shotVector) * epsilon)
+    shotLine = first physical A -> final physical A
+    tolerance = max(1e-12, epsilon)
+    if shotLine has zero length:
+        invalid
+    if shotLine is vertical:
+        invalid
     colors = propagateTowerColors(baseTriangle, activeTriangles, reflectionEdges)
-    maxBlue = -infinity
-    minRed = infinity
+    for each code block:
+        centralAngle = block.count * actualAngle(block.symbol)
+        if centralAngle >= 180deg:
+            invalid
     for each triangle in [baseTriangle] + activeTriangles:
         for each physical vertex index:
             symbol = labelsMap[index]
             occurrence = triangle.id + index + symbol
             role = colors[occurrence]
+            if vertex coordinate is first or final shot endpoint:
+                display it but skip the obstruction test
             if role is missing:
                 invalid
-            score = det(vertex, shotVector)
+            lineY = evaluate shotLine at vertex.x
+            dy = vertex.y - lineY
             if role == blue:
-                maxBlue = max(maxBlue, score)
+                require dy > tolerance
             if role == red:
-                minRed = min(minRed, score)
-    if minRed <= maxBlue + tolerance:
-        invalid
+                require dy < -tolerance
 ```
 
 The tower-color propagation step is:
@@ -778,30 +810,33 @@ function propagateTowerColors(baseTriangle, activeTriangles, reflectionEdges):
         on the new triangle, require/copy opposite colors across the same edge
     on the final reflected triangle:
         color both sides incident to final physical A by the same rule
-    during determinant validation:
-        display endpoint coordinates, but do not include them in maxBlue/minRed
+    during line validation:
+        display endpoint coordinates, but do not use them as obstructions
 ```
 
 ### Constrained And Ghost Shot
 
 Constrained mode protects the current valid code-mode shot by validating the
-proposed candidate against the tower separation predicate before React state is
-updated. If the candidate is invalid, the input is rejected and the last valid
-geometry remains visible. This is what prevents an angle increment from rendering
-an invalid A/B shot in constrained mode.
+proposed candidate before React state is updated. The candidate must preserve the
+current symbolic angle mapping, reflected side sequence, and physical reflection
+edge sequence. It must also satisfy every numeric fan bound and the tower
+line predicate. If any of these fail, the input is rejected and the last
+valid geometry remains visible.
 
 Ghost mode allows invalid candidates. Invalid Ghost geometry is rendered with
 lower-opacity reflected triangles and a red shot vector so the failure can be
 inspected without confusing it for a constrained valid state. Valid Ghost
-geometry uses the same green shot vector as constrained valid geometry.
+geometry uses the same green shot vector as constrained valid geometry. Ghost
+mode captures the finite code path when it starts, so a later exploratory edit
+that changes the reflected path also turns the shot invalid.
 
 ### Stable Region Search
 
 The `Find Stable Region` command searches a bounded local connected region in
 symbolic `x` and `y` angle space. It keeps the current symbolic-to-physical
-mapping, side sequence, and all-vertex tower-separation predicate fixed. It refines the
-grid at `0.1`, `0.01`, and `0.001` degree steps and returns open intervals for
-the discovered local component.
+mapping, side sequence, and all-vertex line predicate fixed. It refines the grid
+at `0.1`, `0.01`, and `0.001` degree steps and returns open intervals for the
+discovered local component.
 
 This is a floating-point exploratory region finder, not interval arithmetic. It
 has a local radius and per-step visit cap to prevent browser lockups.
@@ -817,7 +852,7 @@ function findStableRegion(centerX, centerY):
         rebuild the physical triangle from symbolic x,y,z
         unfold the same code
         require same label map and same side sequence
-        require tower separation to be valid
+        require the all-vertex line test to be valid
         collect min/max valid x and y samples
         shrink next search window around the valid component
     return open intervals expanded by the final step
@@ -928,13 +963,13 @@ Vertex color logic:
 
 - Original `A` and final reflected `A` still get green endpoint circles on the
   drawn shot vector.
-- The code-mode shot vector is green when tower separation is valid and red when
-  it is invalid.
+- The code-mode shot vector is green when the all-vertex line test is valid and
+  red when it is invalid.
 - Formal blue tower vertices are blue.
 - Formal black tower vertices are rendered red.
 - Vertices without a propagated formal color are yellow and invalid.
-- Invalid separation-boundary vertices receive a red ring/label while keeping
-  their formal role color visible.
+- Invalid line-test vertices receive a red ring/label while keeping their formal
+  role color visible.
 - Invalid Ghost geometry is ghosted by lowering reflected-triangle opacity.
 - Derived triangle labels use that triangle's color when no code-mode tower
   validation override applies.
@@ -986,7 +1021,7 @@ The current app already improves on a naive attempt in several practical ways:
 - It can inspect invalid candidates in Ghost mode without losing the
   visual distinction between constrained and exploratory states.
 - It can estimate a bounded local stable `x`/`y` angle region for the current
-  code and tower-separation condition.
+  code and all-vertex line condition.
 - It caches expensive derived geometry with React `useMemo`.
 - It caps code-mode output at 3000 triangles to avoid locking the browser.
 - It renders text labels in screen space, so zooming does not make labels vanish
@@ -1020,8 +1055,8 @@ constraints: x > 0, y > 0, y < z, 90 / x is integer
 - The current stable-region search is local, capped, and grid-based; it should
   not be confused with the exact rational/interval region machinery in the
   parent project.
-- The current separation epsilon is a floating-point determinant tolerance, not
-  a proof certificate.
+- The current epsilon is a floating-point y-coordinate tolerance, not a proof
+  certificate.
 - Singular hits should be handled consistently in both ray and code modes.
 - If a future backend is added, the React app should pass a structured problem
   instance rather than relying on displayed floating-point coordinates.
@@ -1034,7 +1069,7 @@ Use the app this way:
 2. Enter a finite code or ray.
 3. Let the app unfold the triangle chain by reflection.
 4. Inspect whether the `A -> final A` shot vector, side sequence, and formal
-   blue/red tower separation match the intended poolshot/invisibility mechanism.
+   blue/red line-side roles match the intended poolshot/invisibility mechanism.
 5. Treat the result as a visual hypothesis generator, not a proof.
 
 The shortest accurate description is:

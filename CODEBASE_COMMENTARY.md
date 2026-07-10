@@ -46,25 +46,30 @@ the cross-file architecture map.
 - Implements two simulation paths:
   - ray mode: fixed ray through reflected triangles;
   - code mode: integer-code parser plus heuristic reflection chain.
-- Uses the vector from first physical `A` to final reflected physical `A` as the
-  code-mode shot direction; the validator tests separation parallel to that
-  vector rather than assigning sides from the literal endpoint line.
-- Validates every physical `A`, `B`, and `C` occurrence by the paper-style tower
-  test:
+- Uses the line from first physical `A` to final reflected physical `A` as the
+  code-mode shot line; the validator evaluates that line at each vertex x
+  coordinate.
+- Validates every physical `A`, `B`, and `C` occurrence by finite-poolshot tower
+  tests adapted from the paper's unfolding philosophy, without using its
+  periodic-code classification machinery:
   - `A0` is formal blue and `B0` is formal black;
   - each recorded reflection edge propagates opposite formal colors across the
     tower side;
   - the final reflected `AB` side colors the terminal side of the tower;
   - physical `C` occurrences are tracked by triangle id plus vertex index, not by
     their changing coordinates;
-  - the determinant margin `min(det(red,w)) - max(det(blue,w))` must exceed the
-    epsilon-scaled tolerance.
+  - every numeric code block must satisfy `count * actualSymbolAngle < 180deg`,
+    because the block represents one finite fan;
+  - every non-endpoint blue vertex must satisfy `vertex.y > lineY(vertex.x)`;
+  - every non-endpoint red vertex must satisfy `vertex.y < lineY(vertex.x)`;
+  - the epsilon input is applied directly as a y-coordinate tolerance.
 - Supports Constrained mode, which validates a proposed angle edit before
-  committing it to React state and rejects edits that fail the tower test.
+  committing it to React state and rejects edits that fail the tower test or
+  reinterpret the same number string as a different finite code path.
 - Supports Ghost mode, which allows invalid geometry, ghosts the unfolding, and
   colors the shot vector green for valid or red for invalid.
 - Searches a bounded local symbolic `x`/`y` angle region using progressively
-  finer grid steps and the same tower-separation validator as the live view.
+  finer grid steps and the same all-vertex line validator as the live view.
 - Displays first/final shot endpoint occurrences with formal colors while
   ignoring those endpoint coordinates as obstruction contributors.
 - Renders geometry in mathematical coordinates inside a flipped SVG group.
@@ -131,9 +136,9 @@ the cross-file architecture map.
 - The colored shot vector is endpoint-defined: first physical `A` to final
   physical `A`, currently corresponding to symbolic `z/A` in the default
   mapping.
-- The tower validator uses 2D determinants instead of slope division because
-  determinants also work for vertical vectors and directly encode the paper's
-  `det(red - blue, shotVector) > 0` condition.
+- The current tower validator deliberately uses the direct y-at-line predicate
+  requested for this iteration. Vertical shot lines are rejected for now because
+  `lineY(x)` is undefined there.
 
 ## Color Semantics
 
@@ -143,7 +148,7 @@ the cross-file architecture map.
 - Blue markers: formal blue tower vertices.
 - Red markers: formal black tower vertices, rendered red for contrast.
 - Yellow markers: vertices that the tower side-color propagation could not classify.
-- Red rings/labels: vertices violating the strict determinant separation condition.
+- Red rings/labels: vertices violating the strict blue-above/red-below line condition.
 - Muted multicolor triangles: reflected triangle chain.
 - Ghosted triangles: invalid Ghost geometry that is being inspected but would be
   rejected by Constrained mode.
@@ -152,6 +157,6 @@ the cross-file architecture map.
 
 - The app is still floating-point and exploratory.
 - The code parser is not a canonical billiards code validator.
-- The determinant separation predicate is strict but not proof-grade exact arithmetic.
+- The direct y-at-line predicate is strict but not proof-grade exact arithmetic.
 - A future proof backend should receive structured points/code data rather than
   reading rendered SVG state.

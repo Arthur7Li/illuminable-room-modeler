@@ -14,10 +14,10 @@ import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity,
 // 2. measure and control the SVG viewport;
 // 3. derive the base triangle;
 // 4. derive ray-mode or code-mode reflected triangles;
-// 5. derive the shot vector and tower-separation validator;
+// 5. derive the shot vector and direct blue/red line validator;
 // 6. render the sidebar and SVG canvas.
 // When this grows further, the clean split points are: geometry helpers, code
-// parser/unfolder, tower-separation validator, and presentation components.
+// parser/unfolder, shot-line validator, and presentation components.
 
 // Academic color palette: distinct but slightly muted/professional tones.
 // The colors intentionally alternate hue families so long unfoldings remain
@@ -63,6 +63,9 @@ const INVALID_SHOT_COLOR = '#ef4444';
 
 // The default clearance epsilon is a perpendicular-distance tolerance in math units.
 const DEFAULT_CLEARANCE_EPSILON = 1e-10;
+
+// Fan central angles must stay strictly below 180 degrees; this guards roundoff at the boundary.
+const FAN_ANGLE_TOLERANCE_DEGREES = 1e-9;
 
 // Region search refines the grid by one decimal place at each step.
 const REGION_SEARCH_STEPS = [0.1, 0.01, 0.001];
@@ -438,24 +441,22 @@ const getShotGeometry = (baseTriangle, activeTriangles, labelsMap) => {
   const startShot = baseTriangle.points[shotVertexIdx] || baseTriangle.points[0];
   // Use the last reflected physical A as the end of the shot line.
   const finalShot = activeTriangles.length > 0 ? activeTriangles[activeTriangles.length - 1].points[shotVertexIdx] : startShot;
-  // Store the shot vector's x component once for cross-product tests.
+  // Store the shot vector's x component once for line-equation tests.
   const lineDx = finalShot.x - startShot.x;
-  // Store the shot vector's y component once for cross-product tests.
+  // Store the shot vector's y component once for line-equation tests.
   const lineDy = finalShot.y - startShot.y;
-  // Store shot length so distance epsilon can become signed-area epsilon.
+  // Store shot length so endpoint tolerance can scale with the current shot.
   const lineLength = Math.hypot(lineDx, lineDy);
   // Return the full shot geometry bundle used by validation and rendering.
   return { shotVertexIdx, shotSymbol, startShot, finalShot, lineDx, lineDy, lineLength };
 };
 
-/** Returns a positive determinant tolerance derived from perpendicular-distance epsilon. */
-const getSeparationTolerance = (vectorLength, clearanceEpsilon) => {
-  // Invalid or negative epsilon values are clamped to the default tolerance.
+/** Returns a positive y-coordinate tolerance for direct line-side checks. */
+const getLineYTolerance = (clearanceEpsilon) => {
+  // Invalid or negative epsilon values are clamped to the documented default.
   const safeEpsilon = Number.isFinite(clearanceEpsilon) && clearanceEpsilon >= 0 ? clearanceEpsilon : DEFAULT_CLEARANCE_EPSILON;
-  // Determinant area equals perpendicular distance times shot-vector length.
-  const areaTolerance = vectorLength * safeEpsilon;
-  // Keep a small floating-point floor so strict tests are not dominated by roundoff.
-  return Math.max(1e-12, areaTolerance);
+  // Keep a small floating-point floor so strict greater-than checks survive roundoff.
+  return Math.max(1e-12, safeEpsilon);
 };
 
 /** Returns a coordinate tolerance for recognizing the two singular shot endpoints. */
@@ -474,6 +475,112 @@ const isShotEndpointCoordinate = (point, shotGeometry, endpointTolerance) => {
   const finalDistSq = (point.x - shotGeometry.finalShot.x) ** 2 + (point.y - shotGeometry.finalShot.y) ** 2;
   // Endpoints are colored for display but ignored as obstructions.
   return startDistSq <= toleranceSq || finalDistSq <= toleranceSq;
+};
+
+/** Computes the current physical triangle angles in degrees. */
+const getPhysicalAngleDegrees = (baseTriangle) => {
+  // Read the triangle points in physical A/B/C order.
+  const points = baseTriangle.points;
+  // Physical A is measured between CA and AB.
+  const angleA = getAngleAtVertex(points[2], points[0], points[1]) * 180 / Math.PI;
+  // Physical B is measured between AB and BC.
+  const angleB = getAngleAtVertex(points[0], points[1], points[2]) * 180 / Math.PI;
+  // Physical C is measured between BC and CA.
+  const angleC = getAngleAtVertex(points[1], points[2], points[0]) * 180 / Math.PI;
+  // Return the physical angle array in the same index order as triangle points.
+  return [angleA, angleB, angleC];
+};
+
+/** Computes symbolic x/y/z angle values from the current physical triangle and label map. */
+const getSymbolAngleDegreesFromTriangle = (baseTriangle, labelsMap) => {
+  // Compute physical angle values directly from geometry so coordinate mode also works.
+  const physicalAngles = getPhysicalAngleDegrees(baseTriangle);
+  // Build the symbolic angle map from the physical-to-symbol label assignment.
+  return {
+    // Physical vertex 0 contributes its angle to whichever symbol labels it.
+    [labelsMap[0]]: physicalAngles[0],
+    // Physical vertex 1 contributes its angle to whichever symbol labels it.
+    [labelsMap[1]]: physicalAngles[1],
+    // Physical vertex 2 contributes its angle to whichever symbol labels it.
+    [labelsMap[2]]: physicalAngles[2]
+  };
+};
+
+/** Checks every numeric code block against the fan central-angle bound. */
+const buildFanConstraintValidation = ({ parsedSequence, symbolAngles, toleranceDegrees = FAN_ANGLE_TOLERANCE_DEGREES }) => {
+  // No parsed blocks means there are no fan constraints to apply.
+  if (!parsedSequence || parsedSequence.length === 0) {
+    // Return an empty valid result with stable fields for consumers.
+    return { status: 'valid', checked: 0, invalid: 0, maxCentralAngle: 0, maxRatio: 0, violations: [] };
+  }
+  // Count invalid fan constraints without relying on the visible violation list.
+  let invalid = 0;
+  // Track the largest fan central angle encountered.
+  let maxCentralAngle = 0;
+  // Track the largest central-angle-to-180 ratio encountered.
+  let maxRatio = 0;
+  // Keep only a short list of visible fan failures for the inspector.
+  const violations = [];
+  // Walk each code number together with its symbolic fan angle.
+  parsedSequence.forEach((step, index) => {
+    // Read the actual angle attached to this symbolic fan in the candidate triangle.
+    const actualAngle = symbolAngles[step.angle];
+    // A malformed symbol-angle lookup makes the code interpretation invalid.
+    const hasAngle = Number.isFinite(actualAngle);
+    // The central angle of the fan is the code number times the actual triangle angle.
+    const centralAngle = hasAngle ? step.count * actualAngle : Infinity;
+    // Ratio gives a compact "how close to 180" diagnostic.
+    const ratio = hasAngle ? centralAngle / 180 : Infinity;
+    // Store the largest central angle for the UI.
+    maxCentralAngle = Math.max(maxCentralAngle, centralAngle);
+    // Store the largest ratio for the UI.
+    maxRatio = Math.max(maxRatio, ratio);
+    // Poolshot fans must have central angle strictly below 180 degrees.
+    const valid = hasAngle && centralAngle < 180 - toleranceDegrees;
+    // Valid fans require no violation record.
+    if (valid) return;
+    // Count this fan as invalid.
+    invalid++;
+    // Keep the inspector readable by truncating visible fan violations.
+    if (violations.length < 12) {
+      // Store enough context to identify the exact numeric code block.
+      violations.push({ index, step, actualAngle, centralAngle, ratio, expected: `${step.count}${step.angle} < 180deg` });
+    }
+  });
+  // Return fan constraint status and diagnostics.
+  return { status: invalid === 0 ? 'valid' : 'invalid', checked: parsedSequence.length, invalid, maxCentralAngle, maxRatio, violations };
+};
+
+/** Builds a compact reference for the current code interpretation. */
+const buildCodePathReference = (codeData) => ({
+  // Preserve the physical-to-symbol assignment chosen for the starting shot.
+  idxToAngle: { ...codeData.idxToAngle },
+  // Preserve the rendered/reflected side sequence for the starting shot.
+  sideSequence: [...(codeData.sideSequence || [])],
+  // Preserve physical reflection edges because they drive tower coloring.
+  reflectionEdges: [...(codeData.reflectionEdges || [])]
+});
+
+/** Validates that a candidate still represents the same parsed code path. */
+const buildCodePathConsistencyValidation = ({ candidateCodeData, reference }) => {
+  // Without a reference, the candidate is allowed to define its own path.
+  if (!reference) return { status: 'valid', violations: [] };
+  // Require the physical-to-symbol assignment to stay exactly fixed.
+  const sameLabels = haveSameLabelMap(candidateCodeData.idxToAngle, reference.idxToAngle);
+  // Require the displayed side sequence to stay exactly fixed.
+  const sameSides = haveSameSideSequence(candidateCodeData.sideSequence, reference.sideSequence);
+  // Require the physical reflection edge sequence to stay exactly fixed.
+  const sameEdges = haveSameSideSequence(candidateCodeData.reflectionEdges || [], reference.reflectionEdges || []);
+  // Accumulate user-readable path consistency failures.
+  const violations = [];
+  // Report a symbol mapping change separately because it changes what the numbers mean.
+  if (!sameLabels) violations.push({ expected: 'same symbolic angle mapping', score: 0, triId: 'code', vertexName: 'map', symbol: 'x/y/z', role: 'code-path' });
+  // Report a side sequence change because it changes the unfolded shot.
+  if (!sameSides) violations.push({ expected: 'same side sequence from code numbers', score: 0, triId: 'code', vertexName: 'sides', symbol: '1/2/3', role: 'code-path' });
+  // Report a physical edge sequence change because it changes tower-color propagation.
+  if (!sameEdges) violations.push({ expected: 'same physical reflection edges', score: 0, triId: 'code', vertexName: 'edges', symbol: '0/1/2', role: 'code-path' });
+  // The path is valid only if every required sequence matches.
+  return { status: violations.length === 0 ? 'valid' : 'invalid', violations };
 };
 
 /** Builds a stable occurrence key that survives coordinate changes during perturbation. */
@@ -514,7 +621,7 @@ const buildTowerVertexRecord = (tri, vertexIdx, labelsMap, role, source) => {
   const symbol = labelsMap[vertexIdx] || getPhysicalVertexName(vertexIdx);
   // Build an occurrence key that does not depend on the vertex coordinates.
   const key = getClearanceOccurrenceKey(tri.id, vertexIdx, symbol);
-  // Read the current geometric point for determinant calculations.
+  // Read the current geometric point for coloring and line validation.
   const point = tri.points[vertexIdx];
   // Store the conventional physical name for marker text and violation messages.
   const vertexName = getPhysicalVertexName(vertexIdx);
@@ -677,50 +784,79 @@ const buildTowerColoring = ({ baseTriangle, activeTriangles, labelsMap, reflecti
   return { byOccurrence: state.byOccurrence, conflicts: state.conflicts, uncolored };
 };
 
-/** Computes det(point, shotVector), the normal-coordinate score used by the paper test. */
-const getShotDeterminantScore = (point, shotGeometry) => {
-  // det(point, w) equals point.x*w.y - point.y*w.x.
-  return point.x * shotGeometry.lineDy - point.y * shotGeometry.lineDx;
+/** Computes the y value of the visual shot line at a point's x coordinate. */
+const getShotLineYAtX = (point, shotGeometry) => {
+  // A vertical shot line has no single y value for a supplied x coordinate.
+  if (Math.abs(shotGeometry.lineDx) < 1e-12) return null;
+  // Slope of the visual shot line in mathematical coordinates.
+  const slope = shotGeometry.lineDy / shotGeometry.lineDx;
+  // Standard point-slope line evaluation at the vertex x coordinate.
+  return shotGeometry.startShot.y + slope * (point.x - shotGeometry.startShot.x);
 };
 
-/** Validates the unfolded code tower by the formal blue-to-black separation test. */
-const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTriangles, labelsMap, reflectionEdges = [], clearanceEpsilon }) => {
+/** Validates the unfolded code tower by testing every formal blue/red vertex against the shot line. */
+const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTriangles, labelsMap, reflectionEdges = [], parsedSequence = [], clearanceEpsilon, extraViolations = [] }) => {
   // The idle state keeps ray mode and empty code mode visually quiet.
   if (simulatorMode !== 'code' || activeTriangles.length === 0) {
     // Return a complete shape so consumers never need null checks.
-    return { status: 'idle', checked: 0, violations: [], stats: { blue: 0, red: 0, uncolored: 0, endpoints: 0, invalid: 0, epsilonBand: 0, separationMargin: 0 }, byOccurrence: new Map(), shotGeometry: getShotGeometry(baseTriangle, activeTriangles, labelsMap), separationTolerance: 0 };
+    return { status: 'idle', checked: 0, violations: [], stats: { blue: 0, red: 0, uncolored: 0, endpoints: 0, invalid: 0, epsilonBand: 0, lineMargin: 0, fanChecked: 0, fanMaxCentralAngle: 0, fanMaxRatio: 0 }, byOccurrence: new Map(), shotGeometry: getShotGeometry(baseTriangle, activeTriangles, labelsMap), lineTolerance: 0 };
   }
 
-  // Build the shot vector once for every determinant calculation.
+  // Build the shot vector once for every direct line calculation.
   const shotGeometry = getShotGeometry(baseTriangle, activeTriangles, labelsMap);
-  // Convert perpendicular epsilon into determinant units for this shot vector.
-  const separationTolerance = getSeparationTolerance(shotGeometry.lineLength, clearanceEpsilon);
+  // Convert the user epsilon into the direct y-coordinate tolerance used below.
+  const lineTolerance = getLineYTolerance(clearanceEpsilon);
   // Coordinate endpoint matching excludes singular start/final points from obstruction checks.
   const endpointTolerance = getShotEndpointTolerance(shotGeometry.lineLength);
 
-  // A zero-length vector cannot define the paper's separation direction.
+  // A zero-length vector cannot define a shot line.
   if (shotGeometry.lineLength < 1e-12) {
     // Return an invalid trajectory-level violation for the sidebar.
     return {
-      // The vector is invalid because it cannot define a separating direction.
+      // The vector is invalid because it cannot define a line.
       status: 'invalid',
       // No actual vertices can be checked without a usable vector.
       checked: 0,
       // The synthetic violation explains the failure.
       violations: [{ triId: 'trajectory', symbol: shotGeometry.shotSymbol, vertexName: 'A', expected: 'nonzero shot vector', score: 0, side: 0, point: shotGeometry.startShot, role: 'trajectory' }],
       // Stats remain mostly zero because no point loop ran.
-      stats: { blue: 0, red: 0, uncolored: 0, endpoints: 0, invalid: 1, epsilonBand: 0, separationMargin: 0 },
+      stats: { blue: 0, red: 0, uncolored: 0, endpoints: 0, invalid: 1, epsilonBand: 0, lineMargin: 0, fanChecked: 0, fanMaxCentralAngle: 0, fanMaxRatio: 0 },
       // Occurrence map stays empty because there are no point classifications.
       byOccurrence: new Map(),
       // The caller still needs the degenerate shot geometry for rendering.
       shotGeometry,
-      // The determinant tolerance is exposed for diagnostics.
-      separationTolerance
+      // The y-line tolerance is exposed for diagnostics.
+      lineTolerance
+    };
+  }
+
+  // A vertical shot line cannot support the requested y_line(x) comparison.
+  if (Math.abs(shotGeometry.lineDx) < 1e-12) {
+    // Return an invalid trajectory-level violation instead of using a different predicate.
+    return {
+      // The vector is invalid for this validator because y_line(x) is undefined.
+      status: 'invalid',
+      // No vertices are checked because the line equation cannot be evaluated by x.
+      checked: 0,
+      // The synthetic violation explains the failure.
+      violations: [{ triId: 'trajectory', symbol: shotGeometry.shotSymbol, vertexName: 'line', expected: 'nonvertical shot line for y-at-x test', score: 0, side: 0, point: shotGeometry.startShot, role: 'trajectory' }],
+      // Stats remain mostly zero because no point loop ran.
+      stats: { blue: 0, red: 0, uncolored: 0, endpoints: 0, invalid: 1, epsilonBand: 0, lineMargin: 0, fanChecked: 0, fanMaxCentralAngle: 0, fanMaxRatio: 0 },
+      // Occurrence map stays empty because there are no point classifications.
+      byOccurrence: new Map(),
+      // The caller still needs the shot geometry for rendering.
+      shotGeometry,
+      // The tolerance is still exposed for diagnostics.
+      lineTolerance
     };
   }
 
   // Build formal tower colors from the reflection side sequence.
   const towerColoring = buildTowerColoring({ baseTriangle, activeTriangles, labelsMap, reflectionEdges });
+  // Convert the current physical triangle into symbolic x/y/z angle values.
+  const symbolAngles = getSymbolAngleDegreesFromTriangle(baseTriangle, labelsMap);
+  // Validate every numeric code block as a fan central-angle constraint.
+  const fanValidation = buildFanConstraintValidation({ parsedSequence, symbolAngles });
   // Validate the base triangle and every reflected copy.
   const allTris = [baseTriangle, ...activeTriangles];
   // Keep all classifications keyed by occurrence so C vertices are tracked across movement.
@@ -738,17 +874,25 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
   // Count singular start/final endpoint coordinates ignored by the obstruction test.
   let endpoints = 0;
   // Count invalid classifications without relying on the truncated violation list.
-  let invalid = 0;
+  let invalid = fanValidation.invalid + extraViolations.length;
   // Count vertices that participate in the epsilon overlap band.
   let epsilonBand = 0;
-  // Track the largest blue determinant score.
-  let maxBlueScore = -Infinity;
-  // Track the blue occurrence achieving the largest score.
-  let maxBlueRecord = null;
-  // Track the smallest black/red determinant score.
-  let minBlackScore = Infinity;
-  // Track the black/red occurrence achieving the smallest score.
-  let minBlackRecord = null;
+  // Track the smallest absolute valid-side y gap over all checked colored vertices.
+  let lineSideMargin = Infinity;
+  // Add code-path consistency failures before point-level violations.
+  for (const violation of extraViolations) {
+    // Keep the inspector readable by truncating visible code-path violations.
+    if (violations.length < 12) violations.push({ ...violation, point: null });
+  }
+
+  // Add fan central-angle failures before point-level violations.
+  for (const violation of fanValidation.violations) {
+    // Keep the inspector readable by truncating visible fan violations.
+    if (violations.length < 12) {
+      // Convert the fan failure into the same visible violation shape.
+      violations.push({ triId: `fan-${violation.index + 1}`, symbol: violation.step.angle, vertexName: `${violation.step.count}${violation.step.angle}`, expected: violation.expected, score: violation.centralAngle, side: violation.centralAngle, point: null, role: 'fan-constraint' });
+    }
+  }
 
   // Adds a visible violation while keeping the sidebar bounded.
   const addViolation = (classification, expected) => {
@@ -781,8 +925,10 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
       const occurrenceKey = getClearanceOccurrenceKey(tri.id, vertexIdx, symbol);
       // Read the formal tower color assigned by reflection-side propagation.
       const roleRecord = towerColoring.byOccurrence.get(occurrenceKey);
-      // Compute the determinant score for the paper's blue-to-black vector test.
-      const score = getShotDeterminantScore(point, shotGeometry);
+      // Evaluate the drawn shot line at this vertex's x coordinate.
+      const lineY = getShotLineYAtX(point, shotGeometry);
+      // Score is positive when the vertex is above the drawn shot line.
+      const score = point.y - lineY;
       // Shot endpoints are singular endpoints, not interior vertex obstructions.
       const isShotEndpoint = isShotEndpointCoordinate(point, shotGeometry, endpointTolerance);
       // Build the renderable classification for this occurrence.
@@ -801,14 +947,16 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
         point,
         // Formal role comes from the tower-color graph.
         role: roleRecord?.role || 'uncolored',
-        // Determinant score is the scalar tested by separation.
+        // Score is y(vertex) - y_line(vertex.x), matching the requested direct test.
         score,
-        // Endpoint coordinates remain colored but are ignored by the obstruction margin.
+        // Store the line y value for debugging and future UI details.
+        lineY,
+        // Endpoint coordinates remain colored but are ignored by the line-side margin.
         isShotEndpoint,
         // Every occurrence starts valid so one failure path counts it exactly once.
         valid: true,
-        // The default expectation is the strict paper inequality.
-        expected: 'strict blue-to-red separation',
+        // The default expectation is the direct color-vs-line predicate.
+        expected: 'blue above line and red below line',
         // Vertex fill color follows formal role, not current side of the drawn line.
         color: getTowerRoleColor(roleRecord?.role),
         // Valid vertices get a dark low-emphasis ring until a failure path updates them.
@@ -822,32 +970,38 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
       if (isShotEndpoint) {
         // Count ignored endpoints for diagnostics.
         endpoints++;
-        // Skip margin and uncolored checks for singular endpoints.
+        // Skip line-margin and uncolored checks for singular endpoints.
         continue;
       }
       // Count and track blue vertices.
       if (classification.role === TOWER_BLUE_ROLE) {
         // Increment blue total.
         blue++;
-        // The largest blue score is the blue hull's blocking boundary.
-        if (score > maxBlueScore) {
-          // Store the new largest blue score.
-          maxBlueScore = score;
-          // Store the occurrence that achieved it.
-          maxBlueRecord = classification;
+        // Blue vertices must sit strictly above the shot line at their x coordinate.
+        if (score <= lineTolerance) {
+          // Count near-line and wrong-side blue vertices for diagnostics.
+          epsilonBand++;
+          // Mark this blue vertex as invalid.
+          addViolation(classification, 'blue y > line y');
+        } else {
+          // Store the tightest positive blue clearance.
+          lineSideMargin = Math.min(lineSideMargin, score);
         }
       } else if (classification.role === TOWER_BLACK_ROLE) {
         // Increment red-rendered formal black total.
         red++;
-        // The smallest black score is the black hull's blocking boundary.
-        if (score < minBlackScore) {
-          // Store the new smallest black score.
-          minBlackScore = score;
-          // Store the occurrence that achieved it.
-          minBlackRecord = classification;
+        // Red vertices must sit strictly below the shot line at their x coordinate.
+        if (score >= -lineTolerance) {
+          // Count near-line and wrong-side red vertices for diagnostics.
+          epsilonBand++;
+          // Mark this red vertex as invalid.
+          addViolation(classification, 'red y < line y');
+        } else {
+          // Store the tightest positive red clearance below the line.
+          lineSideMargin = Math.min(lineSideMargin, -score);
         }
       } else {
-        // Count missing formal colors separately from separation failures.
+        // Count missing formal colors separately from line-side failures.
         uncolored++;
         // Uncolored vertices are invalid because every tower vertex must be classified.
         addViolation(classification, 'formal blue/red tower color');
@@ -866,51 +1020,25 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
     }
   }
 
-  // The paper test requires det(black - blue, shotVector) to be strictly positive for every pair.
-  const separationMargin = minBlackScore - maxBlueScore;
-  // Strictly separated color hulls have a positive margin larger than epsilon.
-  const separated = Number.isFinite(separationMargin) && separationMargin > separationTolerance;
+  // If no colored non-endpoint vertices were checked, report a zero line margin.
+  const lineMargin = Number.isFinite(lineSideMargin) ? lineSideMargin : 0;
 
-  // Mark the boundary vertices when the formal color sets overlap or touch the epsilon band.
-  if (!separated) {
-    // Walk the already-built classifications so markers identify the exact offenders.
-    for (const classification of byOccurrence.values()) {
-      // Blue vertices fail when they reach or pass the lowest red/black score.
-      const blueFails = classification.role === TOWER_BLUE_ROLE && classification.score >= minBlackScore - separationTolerance;
-      // Red-rendered black vertices fail when they reach or pass the highest blue score.
-      const redFails = classification.role === TOWER_BLACK_ROLE && classification.score <= maxBlueScore + separationTolerance;
-      // Boundary failures are counted as epsilon-band participants.
-      if (blueFails || redFails) epsilonBand++;
-      // Mark the offender invalid for rendering and inspector output.
-      if (blueFails || redFails) addViolation(classification, 'det(red - blue, shot vector) > epsilon');
-    }
-    // If no specific vertex could be marked, report the two extremal records.
-    if (epsilonBand === 0 && maxBlueRecord && minBlackRecord) {
-      // Mark the blue extremum as the upper blue obstruction.
-      addViolation(maxBlueRecord, 'blue score below every red score');
-      // Mark the red extremum as the lower red obstruction.
-      addViolation(minBlackRecord, 'red score above every blue score');
-      // Count the two extremal records as the overlap band.
-      epsilonBand = 2;
-    }
-  }
-
-  // The shot is valid exactly when formal coloring succeeded and the strict separation margin passed.
+  // The shot is valid exactly when every direct color-vs-line predicate passed.
   return {
-    // Validity is based on the full invalid count and the strict margin.
-    status: invalid === 0 && separated ? 'valid' : 'invalid',
+    // Validity is based on the full invalid count.
+    status: invalid === 0 ? 'valid' : 'invalid',
     // Checked counts every A/B/C occurrence in the tower.
     checked,
     // Violations hold the first several failures for the inspector.
     violations,
     // Stats expose category totals without rewalking vertices.
-    stats: { blue, red, uncolored, endpoints, invalid, epsilonBand, separationMargin },
+    stats: { blue, red, uncolored, endpoints, invalid, epsilonBand, lineMargin, fanChecked: fanValidation.checked, fanMaxCentralAngle: fanValidation.maxCentralAngle, fanMaxRatio: fanValidation.maxRatio },
     // byOccurrence lets rendering and locked edits track physical A/B/C occurrences.
     byOccurrence,
     // shotGeometry keeps all endpoint-vector data in one place.
     shotGeometry,
-    // separationTolerance is the determinant-space epsilon used by the paper test.
-    separationTolerance
+    // lineTolerance records the exact epsilon used by the direct y-line predicate.
+    lineTolerance
   };
 };
 
@@ -1023,9 +1151,9 @@ const findStableRegion = ({ angleParams, labelsMap, billiardsCode, currentCodeDa
     const sameLabels = haveSameLabelMap(candidateCodeData.idxToAngle, labelsMap);
     // Require the side sequence to remain unchanged so the same code path is being tested.
     const sameSides = haveSameSideSequence(candidateCodeData.sideSequence, currentCodeData.sideSequence);
-    // Candidate validity uses the same formal tower-separation validator as the live view.
-    const candidateValidation = buildPoolshotTowerValidation({ simulatorMode: 'code', baseTriangle: candidateTriangle, activeTriangles: candidateCodeData.triangles, labelsMap: candidateCodeData.idxToAngle, reflectionEdges: candidateCodeData.reflectionEdges, clearanceEpsilon });
-    // The sample is valid only when mapping, unfolding, and tower separation all agree.
+    // Candidate validity uses the same direct blue/red line validator as the live view.
+    const candidateValidation = buildPoolshotTowerValidation({ simulatorMode: 'code', baseTriangle: candidateTriangle, activeTriangles: candidateCodeData.triangles, labelsMap: candidateCodeData.idxToAngle, reflectionEdges: candidateCodeData.reflectionEdges, parsedSequence: candidateCodeData.parsedSequence, clearanceEpsilon });
+    // The sample is valid only when mapping, unfolding, and the line test all agree.
     const valid = sameLabels && sameSides && candidateValidation.status === 'valid';
     // Cache the computed result.
     validityCache.set(cacheKey, valid);
@@ -1172,6 +1300,8 @@ export default function App() {
   const [lockedShotNotice, setLockedShotNotice] = useState(null);
   // The latest stable-region search result is shown until inputs change.
   const [stableRegionResult, setStableRegionResult] = useState(null);
+  // Ghost mode compares edits against the constrained path captured when Ghost starts.
+  const [shotPathReference, setShotPathReference] = useState(null);
   // Persistent labels are useful for debugging dense unfolded fans.
   const [showAllLabels, setShowAllLabels] = useState(false);
 
@@ -1374,10 +1504,17 @@ export default function App() {
   // Map physical vertex indices back to symbolic labels for UI and validation.
   const labelsMap = codeData.idxToAngle;
 
+  const livePathConsistency = useMemo(() => {
+    // Only Ghost mode needs to compare against a captured constrained path.
+    if (simulatorMode !== 'code' || shotEditMode !== SHOT_MODE_PREVIEW || !shotPathReference) return { status: 'valid', violations: [] };
+    // Validate that the current Ghost geometry still represents the captured code path.
+    return buildCodePathConsistencyValidation({ candidateCodeData: codeData, reference: shotPathReference });
+  }, [simulatorMode, shotEditMode, shotPathReference, codeData]);
+
   const shotClearanceValidation = useMemo(() => {
-    // Use the shared formal tower-separation validator so live rendering, locked edits, and search agree.
-    return buildPoolshotTowerValidation({ simulatorMode, baseTriangle, activeTriangles, labelsMap, reflectionEdges: codeData.reflectionEdges, clearanceEpsilon });
-  }, [simulatorMode, baseTriangle, activeTriangles, labelsMap, codeData.reflectionEdges, clearanceEpsilon]);
+    // Use the shared direct blue/red line validator so live rendering, locked edits, and search agree.
+    return buildPoolshotTowerValidation({ simulatorMode, baseTriangle, activeTriangles, labelsMap, reflectionEdges: codeData.reflectionEdges, parsedSequence: codeData.parsedSequence, clearanceEpsilon, extraViolations: livePathConsistency.violations });
+  }, [simulatorMode, baseTriangle, activeTriangles, labelsMap, codeData.reflectionEdges, codeData.parsedSequence, clearanceEpsilon, livePathConsistency.violations]);
 
   // Store the current shot-vector geometry derived by the validator.
   const shotGeometry = shotClearanceValidation.shotGeometry;
@@ -1411,6 +1548,8 @@ export default function App() {
   };
 
   const resetShotConstraintReference = () => {
+    // Input changes that redefine the code or base triangle invalidate the Ghost reference path.
+    setShotPathReference(null);
     // Input changes outside the guarded angle path should clear stale feedback.
     // Shared feedback cleanup keeps the inspector from showing stale results.
     clearShotFeedback();
@@ -1434,14 +1573,16 @@ export default function App() {
     const candidateTriangle = buildBaseTriangle('angles', baseCoordsInput, candidateParams);
     // Unfold the current code against the candidate triangle.
     const candidateCodeData = unfoldCodeData(billiardsCode, candidateTriangle, true);
-    // Validate the candidate against the formal tower-separation rule before render.
-    const candidateSelfValidation = buildPoolshotTowerValidation({ simulatorMode: 'code', baseTriangle: candidateTriangle, activeTriangles: candidateCodeData.triangles, labelsMap: candidateCodeData.idxToAngle, reflectionEdges: candidateCodeData.reflectionEdges, clearanceEpsilon });
+    // Preserve the current finite code interpretation instead of accepting a fresh reinterpretation.
+    const pathConsistency = buildCodePathConsistencyValidation({ candidateCodeData, reference: buildCodePathReference(codeData) });
+    // Validate the candidate against the direct blue/red line rule before render.
+    const candidateSelfValidation = buildPoolshotTowerValidation({ simulatorMode: 'code', baseTriangle: candidateTriangle, activeTriangles: candidateCodeData.triangles, labelsMap: candidateCodeData.idxToAngle, reflectionEdges: candidateCodeData.reflectionEdges, parsedSequence: candidateCodeData.parsedSequence, clearanceEpsilon, extraViolations: pathConsistency.violations });
     // Reject any candidate ray that is intrinsically invalid.
     if (candidateSelfValidation.status === 'invalid') {
       // Use the first self-validation violation to explain the rejection.
       const firstViolation = candidateSelfValidation.violations[0];
       // Build a concise human-readable rejection message.
-      const reason = firstViolation ? `${firstViolation.triId} ${firstViolation.vertexName || firstViolation.symbol} expected ${firstViolation.expected}` : 'candidate ray failed tower separation';
+      const reason = firstViolation ? `${firstViolation.triId} ${firstViolation.vertexName || firstViolation.symbol} expected ${firstViolation.expected}` : 'candidate ray failed blue/red line test';
       // Reject before the angle state can render the bad ray.
       return { allowed: false, reason };
     }
@@ -1456,7 +1597,7 @@ export default function App() {
     const guard = validateLockedAngleCandidate(candidateParams);
     // Reject invalid candidates before they change the rendered geometry.
     if (!guard.allowed) {
-      // Store the blocked field/value and first separation reason.
+      // Store the blocked field/value and first line-test reason.
       setLockedShotNotice({ field, value, reason: guard.reason });
       // Leave angleParams unchanged so the last valid geometry remains active.
       return;
@@ -1736,14 +1877,14 @@ export default function App() {
               />
               <div className="mt-4 grid grid-cols-2 gap-1 rounded-lg border border-white/10 bg-[#0b1016] p-1">
                 <button
-                  onClick={() => { setLockedShotNotice(null); setShotEditMode(SHOT_MODE_LOCKED); }}
+                  onClick={() => { setShotPathReference(null); setLockedShotNotice(null); setShotEditMode(SHOT_MODE_LOCKED); }}
                   title="Reject angle edits before they can make the current code-mode shot invalid."
                   className={`rounded-md px-2 py-1.5 text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 ${shotEditMode === SHOT_MODE_LOCKED ? 'bg-emerald-400/15 text-emerald-100 shadow-sm' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'}`}
                 >
                   <ShieldCheck className="w-3.5 h-3.5" /> Constrained
                 </button>
                 <button
-                  onClick={() => { setLockedShotNotice(null); setShotEditMode(SHOT_MODE_PREVIEW); }}
+                  onClick={() => { setShotPathReference(simulatorMode === 'code' ? buildCodePathReference(codeData) : null); setLockedShotNotice(null); setShotEditMode(SHOT_MODE_PREVIEW); }}
                   title="Allow invalid shots and render them in ghost mode."
                   className={`rounded-md px-2 py-1.5 text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 ${shotEditMode === SHOT_MODE_PREVIEW ? 'bg-slate-300/15 text-slate-100 shadow-sm' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'}`}
                 >
@@ -1825,7 +1966,7 @@ export default function App() {
                     ) : (
                       <XCircle className="w-3.5 h-3.5 text-red-300" />
                     )}
-                    Tower Separation
+                    Vertex Line Test
                   </h3>
                   <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${shotClearanceValidation.status === 'valid' ? 'text-emerald-100 border-emerald-300/25 bg-emerald-400/10' : 'text-red-100 border-red-300/25 bg-red-400/10'}`}>
                     {shotClearanceValidation.status === 'valid' ? 'VALID' : 'INVALID'}
@@ -1839,7 +1980,8 @@ export default function App() {
                   <span className="font-mono text-slate-500"> endpoints {shotClearanceValidation.stats.endpoints}</span>.
                   <div className="mt-1 text-[10px] text-slate-500">
                     Vector: <span className="font-mono text-slate-300">first {shotSymbol}/A to final {shotSymbol}/A</span>
-                    <span className="font-mono text-slate-500"> | margin {shotClearanceValidation.stats.separationMargin.toExponential(2)}</span>
+                    <span className="font-mono text-slate-500"> | min gap {shotClearanceValidation.stats.lineMargin.toExponential(2)}</span>
+                    <span className="font-mono text-slate-500"> | max fan {shotClearanceValidation.stats.fanMaxCentralAngle.toFixed(4)}&deg;</span>
                     <span className="font-mono text-slate-500"> | epsilon hits {shotClearanceValidation.stats.epsilonBand}</span>
                     <span className="font-mono text-slate-500"> | {shotEditMode === SHOT_MODE_LOCKED ? 'Constrained' : 'Ghost'}</span>
                   </div>
@@ -1849,7 +1991,7 @@ export default function App() {
                     {shotClearanceValidation.violations.slice(0, 3).map((violation, idx) => (
                       <div key={`${violation.triId}-${violation.symbol}-${idx}`} className="rounded-md border border-red-300/20 bg-[#0b1016]/80 px-2 py-1.5 text-[10px] text-red-100">
                         <span className="font-mono font-bold">{violation.triId}</span>
-                        <span className="font-mono"> {violation.symbol}</span> expected {violation.expected}; score =
+                        <span className="font-mono"> {violation.symbol}</span> expected {violation.expected}; dy =
                         <span className="font-mono"> {violation.score.toExponential(2)}</span>
                       </div>
                     ))}
