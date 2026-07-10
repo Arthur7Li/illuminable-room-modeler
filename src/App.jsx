@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle } from 'lucide-react';
+import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle } from 'lucide-react';
 
 // =============================================================================
 // App.jsx architecture note
@@ -14,10 +14,10 @@ import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity,
 // 2. measure and control the SVG viewport;
 // 3. derive the base triangle;
 // 4. derive ray-mode or code-mode reflected triangles;
-// 5. derive the shot line and fan-side validator;
+// 5. derive the shot vector and tower-separation validator;
 // 6. render the sidebar and SVG canvas.
 // When this grows further, the clean split points are: geometry helpers, code
-// parser/unfolder, fan validator, and presentation components.
+// parser/unfolder, tower-separation validator, and presentation components.
 
 // Academic color palette: distinct but slightly muted/professional tones.
 // The colors intentionally alternate hue families so long unfoldings remain
@@ -33,6 +33,64 @@ const COLORS = [
 // Edge 1 (V1-V2) is opposite V0(A) -> Side 1
 // Edge 2 (V2-V0) is opposite V1(B) -> Side 2
 const EDGE_TO_SIDE = { 0: 3, 1: 1, 2: 2 };
+
+// The locked/preview switch stores a short machine value instead of display text.
+const SHOT_MODE_LOCKED = 'locked';
+
+// The preview mode intentionally allows invalid shots so they can be inspected.
+const SHOT_MODE_PREVIEW = 'preview';
+
+// The paper's formal blue tower vertices render blue in the viewer.
+const TOWER_BLUE_COLOR = '#38bdf8';
+
+// The paper's formal black tower vertices render red so valid/invalid state can stay on the ray.
+const TOWER_BLACK_COLOR = '#ef4444';
+
+// Formal tower coloring uses stable role names instead of geometry-derived top/bottom names.
+const TOWER_BLUE_ROLE = 'blue';
+
+// The "black" role is rendered red in this UI to match the requested blue/red vertex contrast.
+const TOWER_BLACK_ROLE = 'black';
+
+// Uncolored vertices use yellow because the formal tower-color graph failed to classify them.
+const BAND_VERTEX_COLOR = '#facc15';
+
+// Valid shots use green for the shot vector in ghost mode.
+const VALID_SHOT_COLOR = '#22c55e';
+
+// Invalid shots use red for the shot vector in ghost mode.
+const INVALID_SHOT_COLOR = '#ef4444';
+
+// The default clearance epsilon is a perpendicular-distance tolerance in math units.
+const DEFAULT_CLEARANCE_EPSILON = 1e-10;
+
+// Region search refines the grid by one decimal place at each step.
+const REGION_SEARCH_STEPS = [0.1, 0.01, 0.001];
+
+// Region search is local and bounded so the browser cannot be locked by a large valid set.
+const REGION_SEARCH_RADIUS_DEGREES = 6;
+
+// Each precision step has its own cap so a coarse run cannot starve later reporting.
+const REGION_SEARCH_MAX_VISITS_PER_STEP = 12000;
+
+// The code unfolder uses the same hard cap everywhere to keep live and candidate runs aligned.
+const MAX_CODE_TRIANGLES = 3000;
+
+// Empty code-mode data keeps UI consumers simple when there is no active code unfolding.
+const EMPTY_CODE_DATA = {
+  // No reflected copies exist until a valid code is parsed.
+  triangles: [],
+  // No parsed runs exist until the user provides numeric tokens.
+  parsedSequence: [],
+  // No boundary sequence exists until reflections are emitted.
+  sideSequence: [],
+  // No physical reflection edge sequence exists until reflections are emitted.
+  reflectionEdges: [],
+  // The default physical-to-symbol map preserves the original x/y/z labels.
+  idxToAngle: { 0: 'x', 1: 'y', 2: 'z' },
+  // The reverse symbol-to-physical map is useful for candidate searches.
+  angleToIdx: { x: 0, y: 1, z: 2 }
+};
 
 // ==========================================
 // MATHEMATICAL CORE FUNCTIONS (Optimized)
@@ -110,6 +168,971 @@ const getGlobalAngle = (startP, endP) => {
   return angle;
 };
 
+/** Builds the base triangle from the same inputs used by the UI controls. */
+const buildBaseTriangle = (baseInputMode, baseCoordsInput, angleParams) => {
+  // Local `points` is assigned from exactly one input mode.
+  let points;
+  // Coordinate mode trusts the three user-editable vertices directly.
+  if (baseInputMode === 'coords') {
+    // Number() converts text inputs while `|| 0` keeps invalid blanks renderable.
+    points = baseCoordsInput.map(p => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 }));
+  } else {
+    // Angle mode interprets A and B in degrees and length as side AB.
+    const A = Number(angleParams.a) || 0;
+    // Angle B is the second physical base angle in degrees.
+    const B = Number(angleParams.b) || 0;
+    // Base length is the physical length of side AB.
+    const L = Number(angleParams.length) || 0;
+    // C is determined by the Euclidean triangle angle sum.
+    const C = 180 - A - B;
+
+    // Invalid triangles still render a fallback so the UI never goes blank.
+    if (A <= 0 || B <= 0 || C <= 0 || L <= 0) {
+      // The fallback keeps the same rough scale as the requested base length.
+      points = [{ x: 0, y: 0 }, { x: Math.max(L, 1), y: 0 }, { x: Math.max(L, 1) / 2, y: 1 }];
+    } else {
+      // Convert degrees to radians for Math.sin/cos.
+      const radA = A * Math.PI / 180;
+      // Convert B for the law-of-sines side calculation.
+      const radB = B * Math.PI / 180;
+      // Convert C for the law-of-sines denominator.
+      const radC = C * Math.PI / 180;
+      // Law of sines computes side AC from the chosen base AB.
+      const b = L * (Math.sin(radB) / Math.sin(radC));
+
+      // Place A at the origin, B on the x-axis, and C by polar coordinates from A.
+      points = [
+        // Physical A anchors the shot convention.
+        { x: 0, y: 0 },
+        // Physical B sets the base scale.
+        { x: L, y: 0 },
+        // Physical C completes the triangle above the base.
+        { x: b * Math.cos(radA), y: b * Math.sin(radA) }
+      ];
+    }
+  }
+  // The base triangle uses a neutral color because it is the fixed anchor.
+  return { id: 'T0', name: 'T0 (Base)', points, color: '#e2e8f0' };
+};
+
+/** Checks whether an angle-input state is complete enough for guarded validation. */
+const hasCompleteAngleParams = (angleParams) => {
+  // Angle A must parse to a finite number before it can be guarded.
+  const A = Number(angleParams.a);
+  // Angle B must parse to a finite number before it can be guarded.
+  const B = Number(angleParams.b);
+  // Base length must parse to a finite number before it can be guarded.
+  const L = Number(angleParams.length);
+  // Incomplete fields are allowed while the user is typing.
+  return Number.isFinite(A) && Number.isFinite(B) && Number.isFinite(L);
+};
+
+/** Checks whether numeric angle inputs describe a nondegenerate Euclidean triangle. */
+const hasValidAngleTriangle = (angleParams) => {
+  // Angle A is parsed once for consistency with `buildBaseTriangle`.
+  const A = Number(angleParams.a);
+  // Angle B is parsed once for consistency with `buildBaseTriangle`.
+  const B = Number(angleParams.b);
+  // Base length is parsed once for consistency with `buildBaseTriangle`.
+  const L = Number(angleParams.length);
+  // The third angle is implicit in the two-input UI.
+  const C = 180 - A - B;
+  // All side/angle values must be positive for the constructed triangle to matter.
+  return A > 0 && B > 0 && C > 0 && L > 0;
+};
+
+/** Returns the two physical side indices incident to a physical vertex angle. */
+const getEdgesForAngle = (idx) => {
+  // Physical A touches edges AB and CA.
+  if (idx === 0) return [0, 2];
+  // Physical B touches edges AB and BC.
+  if (idx === 1) return [0, 1];
+  // Physical C touches edges BC and CA.
+  return [1, 2];
+};
+
+/** Parses and unfolds the integer code against a supplied base triangle. */
+const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
+  // Return a fresh copy so consumers cannot mutate the shared empty constant.
+  const defaultData = { ...EMPTY_CODE_DATA, triangles: [], parsedSequence: [], sideSequence: [], reflectionEdges: [], idxToAngle: { ...EMPTY_CODE_DATA.idxToAngle }, angleToIdx: { ...EMPTY_CODE_DATA.angleToIdx } };
+  // Inactive or empty code mode should behave like an empty unfolding.
+  if (!enabled || !billiardsCode.trim()) return defaultData;
+
+  // Parse all whitespace-separated integers and drop malformed tokens.
+  const nums = billiardsCode.trim().split(/\s+/).map(n => parseInt(n, 10)).filter(n => !isNaN(n));
+  // If every token was malformed, use the same empty default.
+  if (nums.length === 0) return defaultData;
+
+  // `angles` stores the symbolic angle assigned to each integer run.
+  const angles = [];
+  // The symbolic angle alphabet is fixed by the conjecture notation.
+  const axes = ['x', 'y', 'z'];
+  // Historical code convention: the first block starts at y.
+  if (nums.length > 0) angles.push('y');
+  // Historical code convention: the second block starts at x.
+  if (nums.length > 1) angles.push('x');
+
+  // Derive each later symbolic label from parity and the two previous labels.
+  for (let i = 2; i < nums.length; i++) {
+    // Parity is read from the previous count.
+    const currNum = nums[i - 1];
+    // The previous symbolic angle.
+    const currAngle = angles[i - 1];
+    // The symbolic angle before that.
+    const lastAngle = angles[i - 2];
+
+    // Even previous count repeats the label from two positions back.
+    if (currNum % 2 === 0) angles.push(lastAngle);
+    // Odd previous count picks the only remaining symbolic label.
+    else angles.push(axes.find(a => a !== currAngle && a !== lastAngle));
+  }
+
+  // Pair each numeric run with its derived symbolic angle for display and unfolding.
+  const parsedSequence = nums.map((n, i) => ({ count: n, angle: angles[i] }));
+
+  // Track the largest run attached to each symbolic angle.
+  const maxBouncesCode = { x: 0, y: 0, z: 0 };
+  // A larger run is heuristically associated with a smaller geometric angle.
+  parsedSequence.forEach(step => {
+    // Store only the maximum run seen for this symbolic angle.
+    if (step.count > maxBouncesCode[step.angle]) {
+      // Update the symbol's maximum bounce count.
+      maxBouncesCode[step.angle] = step.count;
+    }
+  });
+
+  // Physical triangle vertices for angle measurement.
+  const pts = baseTriangle.points;
+  // Compute physical interior angles and retain their vertex indices.
+  const actualAngles = [
+    // Physical A is measured between CA and AB.
+    { idx: 0, rad: getAngleAtVertex(pts[2], pts[0], pts[1]) },
+    // Physical B is measured between AB and BC.
+    { idx: 1, rad: getAngleAtVertex(pts[0], pts[1], pts[2]) },
+    // Physical C is measured between BC and CA.
+    { idx: 2, rad: getAngleAtVertex(pts[1], pts[2], pts[0]) }
+  ].sort((a, b) => a.rad - b.rad);
+
+  // Sort symbols by their maximum run, descending, then alphabetically for stability.
+  const syms = ['x', 'y', 'z'].sort((a, b) => (maxBouncesCode[b] - maxBouncesCode[a]) || a.localeCompare(b));
+
+  // angleToIdx maps symbolic labels to physical vertex indices.
+  const angleToIdx = {};
+  // idxToAngle maps physical vertex indices back to symbolic labels.
+  const idxToAngle = {};
+  // Largest-run symbol goes to smallest physical angle.
+  angleToIdx[syms[0]] = actualAngles[0].idx; idxToAngle[actualAngles[0].idx] = syms[0];
+  // Middle-run symbol goes to middle physical angle.
+  angleToIdx[syms[1]] = actualAngles[1].idx; idxToAngle[actualAngles[1].idx] = syms[1];
+  // Smallest-run symbol goes to largest physical angle.
+  angleToIdx[syms[2]] = actualAngles[2].idx; idxToAngle[actualAngles[2].idx] = syms[2];
+
+  // Reflected triangle copies emitted by the code unfolding.
+  const triangles = [];
+  // Actual side labels crossed during unfolding, used by the sidebar log.
+  const sideSequence = [];
+  // Physical edge indices crossed during unfolding, used by formal tower coloring.
+  const reflectionEdges = [];
+  // Begin from a mutable copy of the base triangle's points.
+  let currentTri = [...baseTriangle.points];
+  // The centroid gives a coarse notion of current unfolding direction.
+  let currentCentroid = getCentroid(currentTri);
+  // Start direction points from physical A to the initial centroid.
+  let currentDir = { x: currentCentroid.x - currentTri[0].x, y: currentCentroid.y - currentTri[0].y };
+  // Last reflected edge prevents immediately choosing the same side twice within a fan.
+  let lastEdge = null;
+  // Count emitted triangles separately from parsed run count.
+  let triCount = 0;
+
+  // Expand every parsed block into repeated side reflections.
+  for (const step of parsedSequence) {
+    // Convert this symbolic angle to its two physical adjacent edges.
+    const edges = getEdgesForAngle(angleToIdx[step.angle]);
+    // currentEdge will be chosen either by alternation or forwardness.
+    let currentEdge;
+
+    // If we are already alternating within this fan, choose the other adjacent edge.
+    if (lastEdge !== null && edges.includes(lastEdge)) {
+      // Alternate away from the side just reflected.
+      currentEdge = edges[0] === lastEdge ? edges[1] : edges[0];
+    } else {
+      // Otherwise preview the centroid after the first candidate reflection.
+      const cA = testCentroid(currentTri, edges[0]);
+      // Preview the centroid after the second candidate reflection.
+      const cB = testCentroid(currentTri, edges[1]);
+      // Dot product compares how much candidate A continues the current direction.
+      const dotA = (cA.x - currentCentroid.x) * currentDir.x + (cA.y - currentCentroid.y) * currentDir.y;
+      // Dot product compares how much candidate B continues the current direction.
+      const dotB = (cB.x - currentCentroid.x) * currentDir.x + (cB.y - currentCentroid.y) * currentDir.y;
+      // Pick the more forward candidate.
+      currentEdge = dotA > dotB ? edges[0] : edges[1];
+    }
+
+    // Emit exactly `count` reflected triangles for this symbolic run.
+    for (let i = 0; i < step.count; i++) {
+      // Stop immediately once the hard cap is reached.
+      if (triCount >= MAX_CODE_TRIANGLES) break;
+
+      // Log the conventional side number corresponding to the reflected edge.
+      sideSequence.push(EDGE_TO_SIDE[currentEdge]);
+      // Log the physical edge index so the validator can reconstruct tower-color propagation.
+      reflectionEdges.push(currentEdge);
+      // Edge endpoints remain fixed under reflection.
+      const p1 = currentTri[currentEdge];
+      // The next edge endpoint wraps around for edge 2.
+      const p2 = currentTri[(currentEdge + 1) % 3];
+      // The opposite vertex is the only point that moves.
+      const p3 = currentTri[(currentEdge + 2) % 3];
+      // Mirror that opposite vertex across the chosen side.
+      const newP3 = reflectPoint(p3, p1, p2);
+
+      // Build the next triangle in the same physical vertex-index order.
+      const nextTri = [];
+      // Preserve the first endpoint of the reflected side.
+      nextTri[currentEdge] = { ...p1 };
+      // Preserve the second endpoint of the reflected side.
+      nextTri[(currentEdge + 1) % 3] = { ...p2 };
+      // Replace the opposite vertex with its reflected copy.
+      nextTri[(currentEdge + 2) % 3] = { ...newP3 };
+
+      // Store the reflected triangle with a stable id and cycling visual color.
+      triangles.push({
+        // The id is used by labels, violation reports, and endpoint exclusion.
+        id: `Code-T${triangles.length + 1}`,
+        // The reflected points stay in physical A/B/C index order.
+        points: nextTri,
+        // Colors cycle so long unfoldings remain visually separable.
+        color: COLORS[(triangles.length) % COLORS.length]
+      });
+
+      // Update unfolding direction from old centroid to new centroid.
+      const nextCentroid = getCentroid(nextTri);
+      // Store the newest forward direction for the next non-alternating choice.
+      currentDir = { x: nextCentroid.x - currentCentroid.x, y: nextCentroid.y - currentCentroid.y };
+      // Move the centroid cursor forward.
+      currentCentroid = nextCentroid;
+      // Continue from the newly reflected triangle.
+      currentTri = nextTri;
+      // Remember the side just used.
+      lastEdge = currentEdge;
+      // Alternate to the other edge in the same fan for the next bounce.
+      currentEdge = currentEdge === edges[0] ? edges[1] : edges[0];
+      // Increase the safety counter.
+      triCount++;
+    }
+    // Stop outer loop too if the safety cap was hit.
+    if (triCount >= MAX_CODE_TRIANGLES) break;
+  }
+
+  // Return every code-derived structure consumed by the UI and candidate checks.
+  return { triangles, parsedSequence, idxToAngle, angleToIdx, sideSequence, reflectionEdges };
+};
+
+/** Builds the endpoint-defined shot line used by code-mode validation. */
+const getShotGeometry = (baseTriangle, activeTriangles, labelsMap) => {
+  // Physical A is the current source/target vertex convention for the shot.
+  const shotVertexIdx = 0;
+  // Read the symbolic name of physical A so the UI can say "z/A" when relevant.
+  const shotSymbol = labelsMap[shotVertexIdx] || 'A';
+  // Use the first physical A as the start of the shot line.
+  const startShot = baseTriangle.points[shotVertexIdx] || baseTriangle.points[0];
+  // Use the last reflected physical A as the end of the shot line.
+  const finalShot = activeTriangles.length > 0 ? activeTriangles[activeTriangles.length - 1].points[shotVertexIdx] : startShot;
+  // Store the shot vector's x component once for cross-product tests.
+  const lineDx = finalShot.x - startShot.x;
+  // Store the shot vector's y component once for cross-product tests.
+  const lineDy = finalShot.y - startShot.y;
+  // Store shot length so distance epsilon can become signed-area epsilon.
+  const lineLength = Math.hypot(lineDx, lineDy);
+  // Return the full shot geometry bundle used by validation and rendering.
+  return { shotVertexIdx, shotSymbol, startShot, finalShot, lineDx, lineDy, lineLength };
+};
+
+/** Returns a positive determinant tolerance derived from perpendicular-distance epsilon. */
+const getSeparationTolerance = (vectorLength, clearanceEpsilon) => {
+  // Invalid or negative epsilon values are clamped to the default tolerance.
+  const safeEpsilon = Number.isFinite(clearanceEpsilon) && clearanceEpsilon >= 0 ? clearanceEpsilon : DEFAULT_CLEARANCE_EPSILON;
+  // Determinant area equals perpendicular distance times shot-vector length.
+  const areaTolerance = vectorLength * safeEpsilon;
+  // Keep a small floating-point floor so strict tests are not dominated by roundoff.
+  return Math.max(1e-12, areaTolerance);
+};
+
+/** Returns a coordinate tolerance for recognizing the two singular shot endpoints. */
+const getShotEndpointTolerance = (vectorLength) => {
+  // Endpoint matching should absorb reflection roundoff without swallowing real nearby vertices.
+  return Math.max(1e-8, vectorLength * 1e-10);
+};
+
+/** Checks whether a point is at the start or final endpoint of the visual shot vector. */
+const isShotEndpointCoordinate = (point, shotGeometry, endpointTolerance) => {
+  // Squared tolerance avoids square roots in the validation loop.
+  const toleranceSq = endpointTolerance * endpointTolerance;
+  // Squared distance from this point to the shot start endpoint.
+  const startDistSq = (point.x - shotGeometry.startShot.x) ** 2 + (point.y - shotGeometry.startShot.y) ** 2;
+  // Squared distance from this point to the shot final endpoint.
+  const finalDistSq = (point.x - shotGeometry.finalShot.x) ** 2 + (point.y - shotGeometry.finalShot.y) ** 2;
+  // Endpoints are colored for display but ignored as obstructions.
+  return startDistSq <= toleranceSq || finalDistSq <= toleranceSq;
+};
+
+/** Builds a stable occurrence key that survives coordinate changes during perturbation. */
+const getClearanceOccurrenceKey = (triId, vertexIdx, symbol) => {
+  // Triangle id and physical vertex index track C vertices even when coordinates move.
+  return `${triId}:${vertexIdx}:${symbol}`;
+};
+
+/** Returns the display name for a physical triangle vertex. */
+const getPhysicalVertexName = (vertexIdx) => {
+  // The first three physical vertices keep their conventional billiards names.
+  return ['A', 'B', 'C'][vertexIdx] || `V${vertexIdx}`;
+};
+
+/** Returns the opposite formal color role along a tower side. */
+const getOppositeTowerRole = (role) => {
+  // Blue side endpoints force the adjacent side endpoint to be formal black.
+  if (role === TOWER_BLUE_ROLE) return TOWER_BLACK_ROLE;
+  // Black side endpoints force the adjacent side endpoint to be formal blue.
+  if (role === TOWER_BLACK_ROLE) return TOWER_BLUE_ROLE;
+  // Unknown roles cannot propagate a formal tower color.
+  return null;
+};
+
+/** Returns the requested blue/red UI color for a formal tower role. */
+const getTowerRoleColor = (role) => {
+  // Formal blue vertices render blue.
+  if (role === TOWER_BLUE_ROLE) return TOWER_BLUE_COLOR;
+  // Formal black vertices render red in this workbench.
+  if (role === TOWER_BLACK_ROLE) return TOWER_BLACK_COLOR;
+  // Uncolored vertices render yellow because the tower-color propagation failed.
+  return BAND_VERTEX_COLOR;
+};
+
+/** Builds a vertex record shared by coloring, validation, and rendering. */
+const buildTowerVertexRecord = (tri, vertexIdx, labelsMap, role, source) => {
+  // Pull the symbolic label attached to this physical vertex.
+  const symbol = labelsMap[vertexIdx] || getPhysicalVertexName(vertexIdx);
+  // Build an occurrence key that does not depend on the vertex coordinates.
+  const key = getClearanceOccurrenceKey(tri.id, vertexIdx, symbol);
+  // Read the current geometric point for determinant calculations.
+  const point = tri.points[vertexIdx];
+  // Store the conventional physical name for marker text and violation messages.
+  const vertexName = getPhysicalVertexName(vertexIdx);
+  // Return every stable identifier and visual datum in one object.
+  return { key, triId: tri.id, vertexIdx, vertexName, symbol, point, role, color: getTowerRoleColor(role), source };
+};
+
+/** Reads a formal color role from the coloring state. */
+const getTowerRoleRecord = (state, tri, vertexIdx, labelsMap) => {
+  // Pull the symbolic label attached to this physical vertex.
+  const symbol = labelsMap[vertexIdx] || getPhysicalVertexName(vertexIdx);
+  // Build the same occurrence key used when the role was assigned.
+  const key = getClearanceOccurrenceKey(tri.id, vertexIdx, symbol);
+  // Return the existing record when this occurrence has already been colored.
+  return state.byOccurrence.get(key) || null;
+};
+
+/** Assigns a formal tower color to a single vertex occurrence. */
+const setTowerRoleRecord = (state, tri, vertexIdx, labelsMap, role, source) => {
+  // Missing points cannot participate in the tower-color graph.
+  if (!tri?.points?.[vertexIdx]) return null;
+  // Build the new record before checking for conflicts.
+  const nextRecord = buildTowerVertexRecord(tri, vertexIdx, labelsMap, role, source);
+  // Read any previous assignment for this exact occurrence.
+  const previousRecord = state.byOccurrence.get(nextRecord.key);
+  // A previous assignment with the same role is already consistent.
+  if (previousRecord?.role === role) return previousRecord;
+  // A previous assignment with the opposite role means the side sequence is inconsistent.
+  if (previousRecord) {
+    // Store the conflict for the validator instead of throwing during render.
+    state.conflicts.push({ ...nextRecord, expected: previousRecord.role, actual: role, reason: source });
+    // Preserve the first role so rendering remains deterministic.
+    return previousRecord;
+  }
+  // Store the new formal role for this occurrence.
+  state.byOccurrence.set(nextRecord.key, nextRecord);
+  // Return the record so callers can immediately propagate from it.
+  return nextRecord;
+};
+
+/** Adds a tower-color conflict that is not tied to a pre-existing record. */
+const addTowerColorConflict = (state, tri, vertexIdx, labelsMap, expected, actual, reason) => {
+  // Build a normal vertex record so the violation renderer has labels and coordinates.
+  const record = buildTowerVertexRecord(tri, vertexIdx, labelsMap, actual, reason);
+  // Store the expected and actual roles next to the record metadata.
+  state.conflicts.push({ ...record, expected, actual, reason });
+};
+
+/** Propagates opposite formal colors across the two endpoints of one tower side. */
+const propagateTowerEdgeRoles = (state, tri, edge, labelsMap, source) => {
+  // The first endpoint of physical edge e is vertex e.
+  const firstIdx = edge;
+  // The second endpoint of physical edge e wraps around the triangle.
+  const secondIdx = (edge + 1) % 3;
+  // Read any role already assigned to the first endpoint.
+  const firstRecord = getTowerRoleRecord(state, tri, firstIdx, labelsMap);
+  // Read any role already assigned to the second endpoint.
+  const secondRecord = getTowerRoleRecord(state, tri, secondIdx, labelsMap);
+  // If both endpoints are known, they must be opposite formal colors.
+  if (firstRecord && secondRecord) {
+    // Equal endpoint colors violate the paper's side-color rule.
+    if (firstRecord.role === secondRecord.role) addTowerColorConflict(state, tri, secondIdx, labelsMap, getOppositeTowerRole(firstRecord.role), secondRecord.role, source);
+    // No propagation is needed when both endpoints are already known.
+    return;
+  }
+  // If the first endpoint is known, the second endpoint gets the opposite role.
+  if (firstRecord && !secondRecord) {
+    // Assign the second endpoint by the inductive tower-color rule.
+    setTowerRoleRecord(state, tri, secondIdx, labelsMap, getOppositeTowerRole(firstRecord.role), source);
+    // Propagation for this edge is complete.
+    return;
+  }
+  // If the second endpoint is known, the first endpoint gets the opposite role.
+  if (!firstRecord && secondRecord) {
+    // Assign the first endpoint by the inductive tower-color rule.
+    setTowerRoleRecord(state, tri, firstIdx, labelsMap, getOppositeTowerRole(secondRecord.role), source);
+  }
+};
+
+/** Copies formal color roles across the shared mirror edge of adjacent triangles. */
+const syncTowerEdgeRoles = (state, fromTri, toTri, edge, labelsMap, source) => {
+  // Both endpoints of the reflected edge are geometrically shared by the two triangles.
+  for (const vertexIdx of [edge, (edge + 1) % 3]) {
+    // Read the role on the previous triangle's occurrence.
+    const fromRecord = getTowerRoleRecord(state, fromTri, vertexIdx, labelsMap);
+    // Read the role on the next triangle's copied occurrence.
+    const toRecord = getTowerRoleRecord(state, toTri, vertexIdx, labelsMap);
+    // Conflicting shared-edge colors mean the propagation is inconsistent.
+    if (fromRecord && toRecord && fromRecord.role !== toRecord.role) addTowerColorConflict(state, toTri, vertexIdx, labelsMap, fromRecord.role, toRecord.role, source);
+    // A known previous occurrence colors the copied occurrence in the reflected triangle.
+    else if (fromRecord && !toRecord) setTowerRoleRecord(state, toTri, vertexIdx, labelsMap, fromRecord.role, source);
+    // A known copied occurrence can also back-fill the previous side occurrence.
+    else if (!fromRecord && toRecord) setTowerRoleRecord(state, fromTri, vertexIdx, labelsMap, toRecord.role, source);
+  }
+};
+
+/** Builds the paper-style formal blue/black coloring for the whole unfolded tower. */
+const buildTowerColoring = ({ baseTriangle, activeTriangles, labelsMap, reflectionEdges }) => {
+  // The coloring state stores formal roles and any contradictions found while propagating.
+  const state = { byOccurrence: new Map(), conflicts: [] };
+  // The base plus every reflected copy is the finite tower being tested.
+  const allTris = [baseTriangle, ...activeTriangles];
+  // A0 is formal blue by the tower-color definition.
+  setTowerRoleRecord(state, baseTriangle, 0, labelsMap, TOWER_BLUE_ROLE, 'base A0 is blue');
+  // B0 is formal black by the tower-color definition.
+  setTowerRoleRecord(state, baseTriangle, 1, labelsMap, TOWER_BLACK_ROLE, 'base B0 is black');
+  // The base side AB must have opposite colors at its two endpoints.
+  propagateTowerEdgeRoles(state, baseTriangle, 0, labelsMap, 'base side AB');
+
+  // Process each reflection edge in the exact order emitted by the unfolder.
+  for (let i = 0; i < activeTriangles.length; i++) {
+    // The previous triangle is the one being reflected.
+    const previousTri = allTris[i];
+    // The next triangle is the reflected mirror image.
+    const nextTri = allTris[i + 1];
+    // The reflected physical edge was captured during unfolding.
+    const edge = reflectionEdges?.[i];
+    // Missing edge data means this candidate cannot be validated rigorously.
+    if (!Number.isInteger(edge) || edge < 0 || edge > 2) {
+      // Store a synthetic conflict so the validator rejects the candidate.
+      state.conflicts.push({ triId: nextTri?.id || `Code-T${i + 1}`, vertexName: 'edge', symbol: '?', role: 'missing-edge', expected: 'recorded reflection edge', actual: String(edge), reason: 'missing reflection edge', point: null });
+      // Continue so all other available data can still be rendered.
+      continue;
+    }
+    // The side used for reflection also propagates opposite colors within the old triangle.
+    propagateTowerEdgeRoles(state, previousTri, edge, labelsMap, `reflection side ${EDGE_TO_SIDE[edge]}`);
+    // Shared edge endpoints carry their formal colors into the reflected triangle.
+    syncTowerEdgeRoles(state, previousTri, nextTri, edge, labelsMap, `shared reflection side ${EDGE_TO_SIDE[edge]}`);
+    // The copied side in the new triangle must also have opposite endpoint colors.
+    propagateTowerEdgeRoles(state, nextTri, edge, labelsMap, `reflected side ${EDGE_TO_SIDE[edge]}`);
+  }
+
+  // The visual code-mode shot terminates at physical A in the final reflected triangle.
+  if (activeTriangles.length > 0) {
+    // Read the final reflected triangle once for terminal-side coloring.
+    const finalTri = activeTriangles[activeTriangles.length - 1];
+    // A singular endpoint at A can touch either side incident to physical A.
+    for (const terminalEdge of getEdgesForAngle(0)) {
+      // Color terminal-side vertices without letting endpoint coordinates become obstructions.
+      propagateTowerEdgeRoles(state, finalTri, terminalEdge, labelsMap, `terminal side ${EDGE_TO_SIDE[terminalEdge]}`);
+    }
+  }
+
+  // Uncolored occurrences indicate a side sequence that does not define a complete tower strip.
+  const uncolored = [];
+  // Walk every triangle occurrence, including C vertices, to find missing formal colors.
+  for (const tri of allTris) {
+    // Every physical A/B/C occurrence should receive a formal color.
+    for (let vertexIdx = 0; vertexIdx < 3; vertexIdx++) {
+      // Skip malformed triangle points defensively.
+      if (!tri.points[vertexIdx]) continue;
+      // Build the occurrence record without assigning a role.
+      const record = buildTowerVertexRecord(tri, vertexIdx, labelsMap, null, 'uncolored vertex');
+      // Missing role records are validator failures rather than silently ignored vertices.
+      if (!state.byOccurrence.has(record.key)) uncolored.push(record);
+    }
+  }
+
+  // Return the formal coloring and any data-quality failures found along the way.
+  return { byOccurrence: state.byOccurrence, conflicts: state.conflicts, uncolored };
+};
+
+/** Computes det(point, shotVector), the normal-coordinate score used by the paper test. */
+const getShotDeterminantScore = (point, shotGeometry) => {
+  // det(point, w) equals point.x*w.y - point.y*w.x.
+  return point.x * shotGeometry.lineDy - point.y * shotGeometry.lineDx;
+};
+
+/** Validates the unfolded code tower by the formal blue-to-black separation test. */
+const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTriangles, labelsMap, reflectionEdges = [], clearanceEpsilon }) => {
+  // The idle state keeps ray mode and empty code mode visually quiet.
+  if (simulatorMode !== 'code' || activeTriangles.length === 0) {
+    // Return a complete shape so consumers never need null checks.
+    return { status: 'idle', checked: 0, violations: [], stats: { blue: 0, red: 0, uncolored: 0, endpoints: 0, invalid: 0, epsilonBand: 0, separationMargin: 0 }, byOccurrence: new Map(), shotGeometry: getShotGeometry(baseTriangle, activeTriangles, labelsMap), separationTolerance: 0 };
+  }
+
+  // Build the shot vector once for every determinant calculation.
+  const shotGeometry = getShotGeometry(baseTriangle, activeTriangles, labelsMap);
+  // Convert perpendicular epsilon into determinant units for this shot vector.
+  const separationTolerance = getSeparationTolerance(shotGeometry.lineLength, clearanceEpsilon);
+  // Coordinate endpoint matching excludes singular start/final points from obstruction checks.
+  const endpointTolerance = getShotEndpointTolerance(shotGeometry.lineLength);
+
+  // A zero-length vector cannot define the paper's separation direction.
+  if (shotGeometry.lineLength < 1e-12) {
+    // Return an invalid trajectory-level violation for the sidebar.
+    return {
+      // The vector is invalid because it cannot define a separating direction.
+      status: 'invalid',
+      // No actual vertices can be checked without a usable vector.
+      checked: 0,
+      // The synthetic violation explains the failure.
+      violations: [{ triId: 'trajectory', symbol: shotGeometry.shotSymbol, vertexName: 'A', expected: 'nonzero shot vector', score: 0, side: 0, point: shotGeometry.startShot, role: 'trajectory' }],
+      // Stats remain mostly zero because no point loop ran.
+      stats: { blue: 0, red: 0, uncolored: 0, endpoints: 0, invalid: 1, epsilonBand: 0, separationMargin: 0 },
+      // Occurrence map stays empty because there are no point classifications.
+      byOccurrence: new Map(),
+      // The caller still needs the degenerate shot geometry for rendering.
+      shotGeometry,
+      // The determinant tolerance is exposed for diagnostics.
+      separationTolerance
+    };
+  }
+
+  // Build formal tower colors from the reflection side sequence.
+  const towerColoring = buildTowerColoring({ baseTriangle, activeTriangles, labelsMap, reflectionEdges });
+  // Validate the base triangle and every reflected copy.
+  const allTris = [baseTriangle, ...activeTriangles];
+  // Keep all classifications keyed by occurrence so C vertices are tracked across movement.
+  const byOccurrence = new Map();
+  // Keep only the first few violations for readable sidebar output.
+  const violations = [];
+  // Count every A/B/C occurrence inspected.
+  let checked = 0;
+  // Count formal blue vertices.
+  let blue = 0;
+  // Count formal black vertices, rendered red.
+  let red = 0;
+  // Count vertices that never received a formal tower color.
+  let uncolored = 0;
+  // Count singular start/final endpoint coordinates ignored by the obstruction test.
+  let endpoints = 0;
+  // Count invalid classifications without relying on the truncated violation list.
+  let invalid = 0;
+  // Count vertices that participate in the epsilon overlap band.
+  let epsilonBand = 0;
+  // Track the largest blue determinant score.
+  let maxBlueScore = -Infinity;
+  // Track the blue occurrence achieving the largest score.
+  let maxBlueRecord = null;
+  // Track the smallest black/red determinant score.
+  let minBlackScore = Infinity;
+  // Track the black/red occurrence achieving the smallest score.
+  let minBlackRecord = null;
+
+  // Adds a visible violation while keeping the sidebar bounded.
+  const addViolation = (classification, expected) => {
+    // Count this occurrence as invalid only once.
+    if (classification.valid) invalid++;
+    // Mark the classification invalid for marker rendering.
+    classification.valid = false;
+    // Store the human-readable expectation.
+    classification.expected = expected;
+    // Invalid vertices receive a strong red ring.
+    classification.ring = '#7f1d1d';
+    // Only keep a short visible list in the inspector.
+    if (violations.length < 12) {
+      // Preserve enough context to debug the exact offending occurrence.
+      violations.push({ triId: classification.triId, symbol: classification.symbol, vertexName: classification.vertexName, expected, score: classification.score, side: classification.score, point: classification.point, role: classification.role });
+    }
+  };
+
+  // Walk every triangle copy in unfolded order.
+  for (const tri of allTris) {
+    // Check every physical vertex, not only the symbolic fan endpoints.
+    for (let vertexIdx = 0; vertexIdx < 3; vertexIdx++) {
+      // Pull the current physical vertex point.
+      const point = tri.points[vertexIdx];
+      // Skip malformed triangles defensively.
+      if (!point) continue;
+      // Pull the symbolic label attached to this physical vertex.
+      const symbol = labelsMap[vertexIdx] || getPhysicalVertexName(vertexIdx);
+      // Occurrence keys do not depend on coordinates, so changed C vertices are still tracked.
+      const occurrenceKey = getClearanceOccurrenceKey(tri.id, vertexIdx, symbol);
+      // Read the formal tower color assigned by reflection-side propagation.
+      const roleRecord = towerColoring.byOccurrence.get(occurrenceKey);
+      // Compute the determinant score for the paper's blue-to-black vector test.
+      const score = getShotDeterminantScore(point, shotGeometry);
+      // Shot endpoints are singular endpoints, not interior vertex obstructions.
+      const isShotEndpoint = isShotEndpointCoordinate(point, shotGeometry, endpointTolerance);
+      // Build the renderable classification for this occurrence.
+      const classification = {
+        // Stable occurrence key used by marker rendering.
+        key: occurrenceKey,
+        // Triangle id shown in the violation list.
+        triId: tri.id,
+        // Physical vertex index is retained for future debugging.
+        vertexIdx,
+        // Physical vertex name keeps A/B/C tracking explicit.
+        vertexName: getPhysicalVertexName(vertexIdx),
+        // Symbolic label is shown beside the physical vertex name.
+        symbol,
+        // Current point is stored for marker placement.
+        point,
+        // Formal role comes from the tower-color graph.
+        role: roleRecord?.role || 'uncolored',
+        // Determinant score is the scalar tested by separation.
+        score,
+        // Endpoint coordinates remain colored but are ignored by the obstruction margin.
+        isShotEndpoint,
+        // Every occurrence starts valid so one failure path counts it exactly once.
+        valid: true,
+        // The default expectation is the strict paper inequality.
+        expected: 'strict blue-to-red separation',
+        // Vertex fill color follows formal role, not current side of the drawn line.
+        color: getTowerRoleColor(roleRecord?.role),
+        // Valid vertices get a dark low-emphasis ring until a failure path updates them.
+        ring: '#0f172a'
+      };
+      // Store the classification by stable occurrence for marker rendering.
+      byOccurrence.set(occurrenceKey, classification);
+      // Count this inspected vertex occurrence.
+      checked++;
+      // Endpoint coordinates are displayed but do not affect validity.
+      if (isShotEndpoint) {
+        // Count ignored endpoints for diagnostics.
+        endpoints++;
+        // Skip margin and uncolored checks for singular endpoints.
+        continue;
+      }
+      // Count and track blue vertices.
+      if (classification.role === TOWER_BLUE_ROLE) {
+        // Increment blue total.
+        blue++;
+        // The largest blue score is the blue hull's blocking boundary.
+        if (score > maxBlueScore) {
+          // Store the new largest blue score.
+          maxBlueScore = score;
+          // Store the occurrence that achieved it.
+          maxBlueRecord = classification;
+        }
+      } else if (classification.role === TOWER_BLACK_ROLE) {
+        // Increment red-rendered formal black total.
+        red++;
+        // The smallest black score is the black hull's blocking boundary.
+        if (score < minBlackScore) {
+          // Store the new smallest black score.
+          minBlackScore = score;
+          // Store the occurrence that achieved it.
+          minBlackRecord = classification;
+        }
+      } else {
+        // Count missing formal colors separately from separation failures.
+        uncolored++;
+        // Uncolored vertices are invalid because every tower vertex must be classified.
+        addViolation(classification, 'formal blue/red tower color');
+      }
+    }
+  }
+
+  // Report tower-color contradictions as validation failures.
+  for (const conflict of towerColoring.conflicts) {
+    // Count each conflict in the invalid total.
+    invalid++;
+    // Keep the sidebar readable.
+    if (violations.length < 12) {
+      // Convert the propagation conflict into the same visible violation shape.
+      violations.push({ triId: conflict.triId, symbol: conflict.symbol, vertexName: conflict.vertexName, expected: `tower role ${conflict.expected}`, score: 0, side: 0, point: conflict.point, role: conflict.role || 'tower-conflict' });
+    }
+  }
+
+  // The paper test requires det(black - blue, shotVector) to be strictly positive for every pair.
+  const separationMargin = minBlackScore - maxBlueScore;
+  // Strictly separated color hulls have a positive margin larger than epsilon.
+  const separated = Number.isFinite(separationMargin) && separationMargin > separationTolerance;
+
+  // Mark the boundary vertices when the formal color sets overlap or touch the epsilon band.
+  if (!separated) {
+    // Walk the already-built classifications so markers identify the exact offenders.
+    for (const classification of byOccurrence.values()) {
+      // Blue vertices fail when they reach or pass the lowest red/black score.
+      const blueFails = classification.role === TOWER_BLUE_ROLE && classification.score >= minBlackScore - separationTolerance;
+      // Red-rendered black vertices fail when they reach or pass the highest blue score.
+      const redFails = classification.role === TOWER_BLACK_ROLE && classification.score <= maxBlueScore + separationTolerance;
+      // Boundary failures are counted as epsilon-band participants.
+      if (blueFails || redFails) epsilonBand++;
+      // Mark the offender invalid for rendering and inspector output.
+      if (blueFails || redFails) addViolation(classification, 'det(red - blue, shot vector) > epsilon');
+    }
+    // If no specific vertex could be marked, report the two extremal records.
+    if (epsilonBand === 0 && maxBlueRecord && minBlackRecord) {
+      // Mark the blue extremum as the upper blue obstruction.
+      addViolation(maxBlueRecord, 'blue score below every red score');
+      // Mark the red extremum as the lower red obstruction.
+      addViolation(minBlackRecord, 'red score above every blue score');
+      // Count the two extremal records as the overlap band.
+      epsilonBand = 2;
+    }
+  }
+
+  // The shot is valid exactly when formal coloring succeeded and the strict separation margin passed.
+  return {
+    // Validity is based on the full invalid count and the strict margin.
+    status: invalid === 0 && separated ? 'valid' : 'invalid',
+    // Checked counts every A/B/C occurrence in the tower.
+    checked,
+    // Violations hold the first several failures for the inspector.
+    violations,
+    // Stats expose category totals without rewalking vertices.
+    stats: { blue, red, uncolored, endpoints, invalid, epsilonBand, separationMargin },
+    // byOccurrence lets rendering and locked edits track physical A/B/C occurrences.
+    byOccurrence,
+    // shotGeometry keeps all endpoint-vector data in one place.
+    shotGeometry,
+    // separationTolerance is the determinant-space epsilon used by the paper test.
+    separationTolerance
+  };
+};
+
+/** Compares two physical-to-symbol maps for exact current-mapping preservation. */
+const haveSameLabelMap = (left, right) => {
+  // All three physical vertices must retain their symbolic labels.
+  return [0, 1, 2].every(idx => left[idx] === right[idx]);
+};
+
+/** Compares two side sequences for exact unfolding preservation. */
+const haveSameSideSequence = (left, right) => {
+  // A sequence length change means the same code no longer unfolded the same way.
+  if (left.length !== right.length) return false;
+  // Every side number must match in order.
+  return left.every((side, idx) => side === right[idx]);
+};
+
+/** Converts the current physical angle inputs into symbolic x/y/z angle values. */
+const getSymbolAngleValues = (angleParams, labelsMap) => {
+  // Physical A is directly entered in angle mode.
+  const physicalA = Number(angleParams.a);
+  // Physical B is directly entered in angle mode.
+  const physicalB = Number(angleParams.b);
+  // Physical C is implicit from the Euclidean angle sum.
+  const physicalC = 180 - physicalA - physicalB;
+  // Build the reverse map from symbolic labels to physical angle values.
+  const bySymbol = {
+    // Physical vertex 0 carries this symbol's angle.
+    [labelsMap[0]]: physicalA,
+    // Physical vertex 1 carries this symbol's angle.
+    [labelsMap[1]]: physicalB,
+    // Physical vertex 2 carries this symbol's angle.
+    [labelsMap[2]]: physicalC
+  };
+  // Return numeric values in theorem-style x/y/z naming.
+  return { x: bySymbol.x, y: bySymbol.y, z: bySymbol.z };
+};
+
+/** Converts symbolic x/y/z angle values back into the physical A/B input fields. */
+const buildAngleParamsFromSymbolValues = (symbolAngles, labelsMap, length) => {
+  // Physical A should receive whichever symbolic angle label is mapped to vertex 0.
+  const physicalA = symbolAngles[labelsMap[0]];
+  // Physical B should receive whichever symbolic angle label is mapped to vertex 1.
+  const physicalB = symbolAngles[labelsMap[1]];
+  // Return angle-input state compatible with the existing base-triangle builder.
+  return { a: physicalA, b: physicalB, length };
+};
+
+/** Runs a bounded local BFS/DFS-style search for a stable symbolic x/y region. */
+const findStableRegion = ({ angleParams, labelsMap, billiardsCode, currentCodeData, clearanceEpsilon }) => {
+  // Region search only makes sense when the current angle inputs are numeric.
+  if (!hasCompleteAngleParams(angleParams) || !hasValidAngleTriangle(angleParams)) {
+    // Report a clean failure instead of searching around malformed inputs.
+    return { status: 'error', message: 'Angle mode needs positive A, B, and C before region search.', visits: 0 };
+  }
+
+  // Read the current symbolic x/y/z values from the physical angle inputs.
+  const center = getSymbolAngleValues(angleParams, labelsMap);
+  // Guard against missing labels from malformed code data.
+  if (![center.x, center.y, center.z].every(Number.isFinite)) {
+    // Report a clean failure if x/y/z cannot be recovered.
+    return { status: 'error', message: 'Could not map current physical angles to symbolic x/y/z.', visits: 0 };
+  }
+
+  // Preserve the current base length while perturbing only symbolic angles.
+  const length = Number(angleParams.length);
+  // Cache candidate validity by rounded x/y coordinate so repeated BFS hits are cheap.
+  const validityCache = new Map();
+  // Count every candidate evaluation across precision steps.
+  let visits = 0;
+  // Remember whether any precision step hit its visit cap.
+  let capped = false;
+  // Store the best interval bounds found at the latest completed precision.
+  let bestBounds = null;
+  // Start with a symmetric local search window around the current sample.
+  let searchWindow = {
+    // Minimum symbolic x to examine at the current precision.
+    minX: center.x - REGION_SEARCH_RADIUS_DEGREES,
+    // Maximum symbolic x to examine at the current precision.
+    maxX: center.x + REGION_SEARCH_RADIUS_DEGREES,
+    // Minimum symbolic y to examine at the current precision.
+    minY: center.y - REGION_SEARCH_RADIUS_DEGREES,
+    // Maximum symbolic y to examine at the current precision.
+    maxY: center.y + REGION_SEARCH_RADIUS_DEGREES
+  };
+
+  // Evaluates one symbolic x/y grid point with mapping and side-sequence preservation.
+  const isCandidateValid = (x, y, precision) => {
+    // The cache key includes precision because snapped coordinates differ by step.
+    const cacheKey = `${precision}:${x.toFixed(precision)},${y.toFixed(precision)}`;
+    // Return cached results when the BFS reaches the same point again.
+    if (validityCache.has(cacheKey)) return validityCache.get(cacheKey);
+    // Candidate z is determined by the Euclidean angle sum.
+    const z = 180 - x - y;
+    // Reject non-triangular symbolic angle triples immediately.
+    if (x <= 0 || y <= 0 || z <= 0) {
+      // Cache the rejection for duplicate grid visits.
+      validityCache.set(cacheKey, false);
+      // Return the rejection.
+      return false;
+    }
+
+    // Convert symbolic angles back to physical A/B controls using the current mapping.
+    const candidateParams = buildAngleParamsFromSymbolValues({ x, y, z }, labelsMap, length);
+    // Build the candidate triangle without mutating React state.
+    const candidateTriangle = buildBaseTriangle('angles', [], candidateParams);
+    // Unfold the same code against the candidate triangle.
+    const candidateCodeData = unfoldCodeData(billiardsCode, candidateTriangle, true);
+    // Require the symbolic-to-physical assignment to remain unchanged.
+    const sameLabels = haveSameLabelMap(candidateCodeData.idxToAngle, labelsMap);
+    // Require the side sequence to remain unchanged so the same code path is being tested.
+    const sameSides = haveSameSideSequence(candidateCodeData.sideSequence, currentCodeData.sideSequence);
+    // Candidate validity uses the same formal tower-separation validator as the live view.
+    const candidateValidation = buildPoolshotTowerValidation({ simulatorMode: 'code', baseTriangle: candidateTriangle, activeTriangles: candidateCodeData.triangles, labelsMap: candidateCodeData.idxToAngle, reflectionEdges: candidateCodeData.reflectionEdges, clearanceEpsilon });
+    // The sample is valid only when mapping, unfolding, and tower separation all agree.
+    const valid = sameLabels && sameSides && candidateValidation.status === 'valid';
+    // Cache the computed result.
+    validityCache.set(cacheKey, valid);
+    // Return the computed result to the BFS.
+    return valid;
+  };
+
+  // Run progressively finer local searches.
+  for (const step of REGION_SEARCH_STEPS) {
+    // Decimal precision needs enough digits to key snapped grid points.
+    const precision = Math.max(0, Math.ceil(-Math.log10(step))) + 3;
+    // Snap helper prevents floating drift from creating duplicate grid nodes.
+    const snap = (value) => Number(value.toFixed(precision));
+    // Seed the search at the current symbolic angle pair.
+    const queue = [{ x: snap(center.x), y: snap(center.y) }];
+    // Track visited nodes at this precision only.
+    const seen = new Set();
+    // Bounds collect valid samples found at this precision.
+    const bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+    // Count valid samples found at this precision.
+    let validSamples = 0;
+    // Count visited nodes at this precision.
+    let stepVisits = 0;
+
+    // Search a connected component of valid grid points around the current sample.
+    while (queue.length > 0 && stepVisits < REGION_SEARCH_MAX_VISITS_PER_STEP) {
+      // Shift gives BFS order; the bounded connected-component result is what matters.
+      const node = queue.shift();
+      // Build a stable key for this snapped x/y sample.
+      const key = `${node.x.toFixed(precision)},${node.y.toFixed(precision)}`;
+      // Skip repeated nodes produced by neighboring samples.
+      if (seen.has(key)) continue;
+      // Mark this grid node visited.
+      seen.add(key);
+      // Ignore nodes outside the current local search window.
+      if (node.x < searchWindow.minX || node.x > searchWindow.maxX || node.y < searchWindow.minY || node.y > searchWindow.maxY) continue;
+      // Count this as an evaluated visit.
+      stepVisits++;
+      // Count this across all precision steps for reporting.
+      visits++;
+      // Reject invalid samples without expanding their neighbors.
+      if (!isCandidateValid(node.x, node.y, precision)) continue;
+      // Count this valid sample.
+      validSamples++;
+      // Expand the valid x interval.
+      bounds.minX = Math.min(bounds.minX, node.x);
+      // Expand the valid x interval.
+      bounds.maxX = Math.max(bounds.maxX, node.x);
+      // Expand the valid y interval.
+      bounds.minY = Math.min(bounds.minY, node.y);
+      // Expand the valid y interval.
+      bounds.maxY = Math.max(bounds.maxY, node.y);
+      // Push the neighboring grid samples for connected-component exploration.
+      queue.push({ x: snap(node.x + step), y: node.y });
+      // Push the neighboring grid samples for connected-component exploration.
+      queue.push({ x: snap(node.x - step), y: node.y });
+      // Push the neighboring grid samples for connected-component exploration.
+      queue.push({ x: node.x, y: snap(node.y + step) });
+      // Push the neighboring grid samples for connected-component exploration.
+      queue.push({ x: node.x, y: snap(node.y - step) });
+    }
+
+    // Mark the result as capped if this precision exhausted its visit allowance.
+    if (queue.length > 0 && stepVisits >= REGION_SEARCH_MAX_VISITS_PER_STEP) capped = true;
+    // Stop immediately if the current center is not valid at this precision.
+    if (validSamples === 0) {
+      // Return a no-region result with the precision that failed.
+      return { status: 'none', message: `No valid connected region found at step ${step}.`, visits, capped };
+    }
+
+    // Store the best bounds from this precision.
+    bestBounds = { ...bounds, step };
+    // Restrict the next search to a narrow expansion around the latest valid component.
+    searchWindow = {
+      // Permit one coarse margin around the discovered component for boundary refinement.
+      minX: bounds.minX - step,
+      // Permit one coarse margin around the discovered component for boundary refinement.
+      maxX: bounds.maxX + step,
+      // Permit one coarse margin around the discovered component for boundary refinement.
+      minY: bounds.minY - step,
+      // Permit one coarse margin around the discovered component for boundary refinement.
+      maxY: bounds.maxY + step
+    };
+  }
+
+  // If every precision somehow failed to set bounds, report no region.
+  if (!bestBounds) {
+    // This is defensive because the loop normally returns earlier.
+    return { status: 'none', message: 'No stable samples were found.', visits, capped };
+  }
+
+  // Convert closed grid sample bounds into open intervals by stepping just outside them.
+  const intervals = {
+    // Open x interval lower endpoint.
+    xMin: bestBounds.minX - bestBounds.step,
+    // Open x interval upper endpoint.
+    xMax: bestBounds.maxX + bestBounds.step,
+    // Open y interval lower endpoint.
+    yMin: bestBounds.minY - bestBounds.step,
+    // Open y interval upper endpoint.
+    yMax: bestBounds.maxY + bestBounds.step
+  };
+
+  // Return the final bounded local region estimate.
+  return { status: 'found', intervals, step: bestBounds.step, visits, capped };
+};
+
 
 // ==========================================
 // MAIN APPLICATION COMPONENT
@@ -141,6 +1164,14 @@ export default function App() {
   // --- CODE UNFOLDER SPECIFIC STATE ---
   // Space-separated integer blocks are parsed into symbolic angle runs.
   const [billiardsCode, setBilliardsCode] = useState("3 1 7 2 6 2 8 2 4 2"); 
+  // Constrained rejects invalid guarded edits; Ghost allows invalid inspection.
+  const [shotEditMode, setShotEditMode] = useState(SHOT_MODE_LOCKED);
+  // Epsilon is stored as text so scientific notation remains editable.
+  const [clearanceEpsilonInput, setClearanceEpsilonInput] = useState(String(DEFAULT_CLEARANCE_EPSILON));
+  // A rejected locked edit reports what was blocked without changing geometry.
+  const [lockedShotNotice, setLockedShotNotice] = useState(null);
+  // The latest stable-region search result is shown until inputs change.
+  const [stableRegionResult, setStableRegionResult] = useState(null);
   // Persistent labels are useful for debugging dense unfolded fans.
   const [showAllLabels, setShowAllLabels] = useState(false);
 
@@ -206,43 +1237,17 @@ export default function App() {
 
 
   // --- DYNAMIC GEOMETRY GENERATION ---
+
+  const clearanceEpsilon = useMemo(() => {
+    // Parse the editable text field into a numeric perpendicular-distance tolerance.
+    const parsed = Number(clearanceEpsilonInput);
+    // Invalid or negative input falls back to the documented default.
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CLEARANCE_EPSILON;
+  }, [clearanceEpsilonInput]);
   
   const baseTriangle = useMemo(() => {
-    // Local `points` is assigned from exactly one input mode.
-    let points;
-    // Coordinate mode trusts the three user-editable vertices directly.
-    if (baseInputMode === 'coords') {
-      // Number() converts text inputs while `|| 0` keeps invalid blanks renderable.
-      points = baseCoordsInput.map(p => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 }));
-    } else {
-      // Angle mode interprets A and B in degrees and length as side AB.
-      const A = Number(angleParams.a) || 0; 
-      const B = Number(angleParams.b) || 0; 
-      const L = Number(angleParams.length) || 0; 
-      // C is determined by the Euclidean triangle angle sum.
-      const C = 180 - A - B; 
-      
-      // Invalid triangles still render a fallback so the UI never goes blank.
-      if (A <= 0 || B <= 0 || C <= 0 || L <= 0) {
-        points = [{x: 0, y: 0}, {x: Math.max(L, 1), y: 0}, {x: Math.max(L, 1)/2, y: 1}]; 
-      } else {
-        // Convert degrees to radians for Math.sin/cos.
-        const radA = A * Math.PI / 180;
-        const radB = B * Math.PI / 180;
-        const radC = C * Math.PI / 180;
-        // Law of sines computes side AC from the chosen base AB.
-        const b = L * (Math.sin(radB) / Math.sin(radC));
-        
-        // Place A at the origin, B on the x-axis, and C by polar coordinates from A.
-        points = [
-          { x: 0, y: 0 },
-          { x: L, y: 0 },
-          { x: b * Math.cos(radA), y: b * Math.sin(radA) }
-        ];
-      }
-    }
-    // The base triangle uses a neutral color because it is the fixed anchor.
-    return { id: 'T0', name: 'T0 (Base)', points, color: '#e2e8f0' }; 
+    // Use the shared pure builder so live rendering and candidate validation match.
+    return buildBaseTriangle(baseInputMode, baseCoordsInput, angleParams); 
   }, [baseCoordsInput, baseInputMode, angleParams]);
 
 
@@ -358,170 +1363,8 @@ export default function App() {
 
 
   const codeData = useMemo(() => {
-    // Default data keeps downstream rendering simple when code mode is inactive.
-    const defaultData = { triangles: [], parsedSequence: [], sideSequence: [], idxToAngle: {0: 'x', 1: 'y', 2: 'z'} };
-    // Empty code means no reflected chain should be rendered.
-    if (simulatorMode !== 'code' || !billiardsCode.trim()) return defaultData;
-
-    // Parse all whitespace-separated integers and drop malformed tokens.
-    const nums = billiardsCode.trim().split(/\s+/).map(n => parseInt(n, 10)).filter(n => !isNaN(n));
-    // If every token was malformed, use the same empty default.
-    if (nums.length === 0) return defaultData;
-
-    // --- ALGORITHMIC PARSER ---
-    // `angles` stores the symbolic angle assigned to each integer run.
-    const angles = [];
-    // The symbolic angle alphabet is fixed by the conjecture notation.
-    const axes = ['x', 'y', 'z'];
-    // Historical code convention: the first block starts at y.
-    if (nums.length > 0) angles.push('y');
-    // Historical code convention: the second block starts at x.
-    if (nums.length > 1) angles.push('x');
-
-    // Derive each later symbolic label from parity and the two previous labels.
-    for (let i = 2; i < nums.length; i++) {
-      // Parity is read from the previous count.
-      const currNum = nums[i - 1]; 
-      // The previous symbolic angle.
-      const currAngle = angles[i - 1];
-      // The symbolic angle before that.
-      const lastAngle = angles[i - 2];
-
-      // Even previous count repeats the label from two positions back.
-      if (currNum % 2 === 0) angles.push(lastAngle); 
-      // Odd previous count picks the only remaining symbolic label.
-      else angles.push(axes.find(a => a !== currAngle && a !== lastAngle)); 
-    }
-
-    // Pair each numeric run with its derived symbolic angle for display and unfolding.
-    const parsedSequence = nums.map((n, i) => ({ count: n, angle: angles[i] }));
-    
-    // --- SMART ANGLE MAPPING ---
-    // Track the largest run attached to each symbolic angle.
-    const maxBouncesCode = { x: 0, y: 0, z: 0 };
-    // A larger run is heuristically associated with a smaller geometric angle.
-    parsedSequence.forEach(step => {
-      if (step.count > maxBouncesCode[step.angle]) {
-        maxBouncesCode[step.angle] = step.count;
-      }
-    });
-
-    // Physical triangle vertices for angle measurement.
-    const pts = baseTriangle.points;
-    // Compute physical interior angles and retain their vertex indices.
-    const actualAngles = [
-      { idx: 0, rad: getAngleAtVertex(pts[2], pts[0], pts[1]) }, 
-      { idx: 1, rad: getAngleAtVertex(pts[0], pts[1], pts[2]) }, 
-      { idx: 2, rad: getAngleAtVertex(pts[1], pts[2], pts[0]) }  
-    ].sort((a, b) => a.rad - b.rad); 
-
-    // Sort symbols by their maximum run, descending, then alphabetically for stability.
-    const syms = ['x', 'y', 'z'].sort((a, b) => (maxBouncesCode[b] - maxBouncesCode[a]) || a.localeCompare(b));
-
-    // angleToIdx maps symbolic labels to physical vertex indices.
-    const angleToIdx = {}; 
-    // idxToAngle maps physical vertex indices back to symbolic labels.
-    const idxToAngle = {}; 
-    // Largest-run symbol goes to smallest physical angle.
-    angleToIdx[syms[0]] = actualAngles[0].idx; idxToAngle[actualAngles[0].idx] = syms[0];
-    // Middle-run symbol goes to middle physical angle.
-    angleToIdx[syms[1]] = actualAngles[1].idx; idxToAngle[actualAngles[1].idx] = syms[1];
-    // Smallest-run symbol goes to largest physical angle.
-    angleToIdx[syms[2]] = actualAngles[2].idx; idxToAngle[actualAngles[2].idx] = syms[2];
-
-    // --- SPATIAL MIRRORING ---
-    // Reflected triangle copies emitted by the code unfolding.
-    const triangles = [];
-    // Actual side labels crossed during unfolding, used by the sidebar log.
-    const sideSequence = []; 
-    // Begin from a mutable copy of the base triangle's points.
-    let currentTri = [...baseTriangle.points];
-    // The centroid gives a coarse notion of current unfolding direction.
-    let currentCentroid = getCentroid(currentTri);
-    // Start direction points from physical A to the initial centroid.
-    let currentDir = { x: currentCentroid.x - currentTri[0].x, y: currentCentroid.y - currentTri[0].y };
-
-    // Last reflected edge prevents immediately choosing the same side twice within a fan.
-    let lastEdge = null; 
-    // Count emitted triangles separately from parsed run count.
-    let triCount = 0;
-    // Hard cap protects the browser if the code input is huge.
-    const MAX_TRIS = 3000; 
-    
-    // A vertex angle is adjacent to exactly two triangle edges.
-    const getEdgesForAngle = (idx) => idx === 0 ? [0, 2] : (idx === 1 ? [0, 1] : [1, 2]);
-
-    // Expand every parsed block into repeated side reflections.
-    for (const step of parsedSequence) {
-      // Convert this symbolic angle to its two physical adjacent edges.
-      const edges = getEdgesForAngle(angleToIdx[step.angle]);
-      // currentEdge will be chosen either by alternation or forwardness.
-      let currentEdge;
-
-      // If we are already alternating within this fan, choose the other adjacent edge.
-      if (lastEdge !== null && edges.includes(lastEdge)) {
-        currentEdge = edges[0] === lastEdge ? edges[1] : edges[0];
-      } else {
-        // Otherwise preview both candidate reflections.
-        const cA = testCentroid(currentTri, edges[0]);
-        const cB = testCentroid(currentTri, edges[1]);
-        
-        // Dot products compare which candidate better continues the current unfolding direction.
-        const dotA = (cA.x - currentCentroid.x) * currentDir.x + (cA.y - currentCentroid.y) * currentDir.y;
-        const dotB = (cB.x - currentCentroid.x) * currentDir.x + (cB.y - currentCentroid.y) * currentDir.y;
-        // Pick the more forward candidate.
-        currentEdge = dotA > dotB ? edges[0] : edges[1];
-      }
-
-      // Emit exactly `count` reflected triangles for this symbolic run.
-      for (let i = 0; i < step.count; i++) {
-        // Stop immediately once the hard cap is reached.
-        if (triCount >= MAX_TRIS) break;
-
-        // Log the conventional side number corresponding to the reflected edge.
-        sideSequence.push(EDGE_TO_SIDE[currentEdge]);
-
-        // Edge endpoints remain fixed under reflection.
-        const p1 = currentTri[currentEdge];
-        const p2 = currentTri[(currentEdge + 1) % 3];
-        // The opposite vertex is the only point that moves.
-        const p3 = currentTri[(currentEdge + 2) % 3];
-        // Mirror that opposite vertex across the chosen side.
-        const newP3 = reflectPoint(p3, p1, p2);
-
-        // Build the next triangle in the same physical vertex-index order.
-        const nextTri = [];
-        nextTri[currentEdge] = { ...p1 };
-        nextTri[(currentEdge + 1) % 3] = { ...p2 };
-        nextTri[(currentEdge + 2) % 3] = { ...newP3 };
-
-        // Store the reflected triangle with a stable id and cycling visual color.
-        triangles.push({
-          id: `Code-T${triangles.length + 1}`,
-          points: nextTri,
-          color: COLORS[(triangles.length) % COLORS.length]
-        });
-
-        // Update unfolding direction from old centroid to new centroid.
-        const nextCentroid = getCentroid(nextTri);
-        currentDir = { x: nextCentroid.x - currentCentroid.x, y: nextCentroid.y - currentCentroid.y };
-        currentCentroid = nextCentroid;
-
-        // Continue from the newly reflected triangle.
-        currentTri = nextTri;
-        // Remember the side just used.
-        lastEdge = currentEdge;
-        // Alternate to the other edge in the same fan for the next bounce.
-        currentEdge = currentEdge === edges[0] ? edges[1] : edges[0];
-        // Increase the safety counter.
-        triCount++;
-      }
-      // Stop outer loop too if the safety cap was hit.
-      if (triCount >= MAX_TRIS) break;
-    }
-
-    // Return every code-derived structure consumed by the UI.
-    return { triangles, parsedSequence, idxToAngle, sideSequence };
+    // Use the shared pure unfolder so live rendering and candidate validation match.
+    return unfoldCodeData(billiardsCode, baseTriangle, simulatorMode === 'code');
   }, [simulatorMode, billiardsCode, baseTriangle]);
 
 
@@ -529,164 +1372,109 @@ export default function App() {
   // Pick the triangle chain produced by the currently selected mode.
   const activeTriangles = simulatorMode === 'ray' ? rayData.triangles : codeData.triangles;
   // Map physical vertex indices back to symbolic labels for UI and validation.
-  const labelsMap = codeData.idxToAngle || {0: 'x', 1: 'y', 2: 'z'};
+  const labelsMap = codeData.idxToAngle;
 
-  // Extracted constants to prevent repeated calculation overhead inside rendering logic
-  // Find the physical vertex index carrying a symbolic label under the parser map.
-  const getVertexForSymbol = (symbol, fallback) => {
-    // Object.entries gives [physicalVertexIndex, symbolicLabel] pairs.
-    const match = Object.entries(labelsMap).find(([, label]) => label === symbol);
-    // Fall back to the conventional A/B/C index when the code map is absent.
-    return match ? Number(match[0]) : fallback;
-  };
-  // Find the current physical vertex used for symbolic y fan checks.
-  const yVertexIdx = getVertexForSymbol('y', 1);
-  // Find the current physical vertex used for symbolic z fan checks.
-  const zVertexIdx = getVertexForSymbol('z', 2);
-  // The shot endpoint is the physical A vertex; in the default code mapping this
-  // is the symbolic z vertex, which is why the UI may show it as z/A.
-  // Keep this as an explicit constant because it is the central shot convention.
-  const shotVertexIdx = 0;
-  // Read the symbolic name of physical A so the UI can say "z/A" when relevant.
-  const shotSymbol = labelsMap[shotVertexIdx] || 'A';
-  // Use the first physical A as the start of the shot line.
-  const startShot = baseTriangle.points[shotVertexIdx] || baseTriangle.points[0];
-  // Use the last reflected physical A as the end of the shot line.
-  const finalShot = activeTriangles.length > 0 ? activeTriangles[activeTriangles.length - 1].points[shotVertexIdx] : startShot;
-  // Store the shot vector's x component once for cross-product tests.
-  const lineDx = finalShot.x - startShot.x;
-  // Store the shot vector's y component once for cross-product tests.
-  const lineDy = finalShot.y - startShot.y;
-  // Store shot length so tolerance scales with the geometry size.
-  const lineLength = Math.hypot(lineDx, lineDy);
-  // Keep strict tests numerically sane while still rejecting on-line fan points.
-  const lineSideTolerance = Math.max(1e-10, lineLength * Math.max(1, lineLength) * 1e-10);
-  // Signed area test: positive means left/above the oriented shot line.
-  const getLineSide = (p) => lineDx * (p.y - startShot.y) - lineDy * (p.x - startShot.x);
-  // Convert a point and symbolic label into a validator color/status object.
-  const getFanPointValidation = (p, symbol) => {
-    // Fan validation only applies to code mode with a non-degenerate shot line.
-    if (simulatorMode !== 'code' || activeTriangles.length === 0 || lineLength < 1e-12) {
-      return null;
-    }
+  const shotClearanceValidation = useMemo(() => {
+    // Use the shared formal tower-separation validator so live rendering, locked edits, and search agree.
+    return buildPoolshotTowerValidation({ simulatorMode, baseTriangle, activeTriangles, labelsMap, reflectionEdges: codeData.reflectionEdges, clearanceEpsilon });
+  }, [simulatorMode, baseTriangle, activeTriangles, labelsMap, codeData.reflectionEdges, clearanceEpsilon]);
 
-    // y is required on the positive side; z is required on the negative side.
-    const expectedSide = symbol === 'y' ? 1 : symbol === 'z' ? -1 : 0;
-    // Non-fan symbols are ignored by this validator.
-    if (expectedSide === 0) return null;
-
-    // Compute the signed side using a cross product, not slope division.
-    const side = getLineSide(p);
-    // Enforce strict side separation with a tolerance band around the red line.
-    const valid = expectedSide > 0
-      ? side > lineSideTolerance
-      : side < -lineSideTolerance;
-
-    // Return both semantic data and display colors to keep UI logic simple.
-    return {
-      side,
-      valid,
-      expected: expectedSide > 0 ? 'above' : 'below',
-      color: valid ? '#22c55e' : '#ef4444',
-      ring: valid ? '#14532d' : '#7f1d1d'
-    };
+  // Store the current shot-vector geometry derived by the validator.
+  const shotGeometry = shotClearanceValidation.shotGeometry;
+  // Keep the current symbolic endpoint label available to sidebar text.
+  const shotSymbol = shotGeometry.shotSymbol;
+  // Keep the first endpoint available to the SVG shot line.
+  const startShot = shotGeometry.startShot;
+  // Keep the final endpoint available to the SVG shot line.
+  const finalShot = shotGeometry.finalShot;
+  // Keep line length available for text and degenerate guards.
+  const lineLength = shotGeometry.lineLength;
+  // Preview mode ghosting activates only for an invalid code-mode shot.
+  const isGhostedShot = simulatorMode === 'code' && shotEditMode === SHOT_MODE_PREVIEW && shotClearanceValidation.status === 'invalid';
+  // The shot vector turns green when valid and red when invalid.
+  const shotLineColor = shotClearanceValidation.status === 'valid' ? VALID_SHOT_COLOR : INVALID_SHOT_COLOR;
+  // Lookup a rendered point's validation classification without recomputing the scan.
+  const getClearancePointValidation = (triId, vertexIdx, symbol) => {
+    // Clearance classification applies only to active code-mode shots.
+    if (simulatorMode !== 'code' || activeTriangles.length === 0 || lineLength < 1e-12) return null;
+    // Build the stable occurrence key used by the validator.
+    const occurrenceKey = getClearanceOccurrenceKey(triId, vertexIdx, symbol);
+    // Return the existing classification when this occurrence was part of the scan.
+    return shotClearanceValidation.byOccurrence.get(occurrenceKey) || null;
   };
 
-  const fanValidation = useMemo(() => {
-    // Without a code unfolding there are no fan vertices to validate.
-    if (simulatorMode !== 'code' || activeTriangles.length === 0) {
-      return { status: 'idle', checked: 0, violations: [] };
+  const clearShotFeedback = () => {
+    // Accepted input changes invalidate the previously displayed region search.
+    setStableRegionResult(null);
+    // Accepted input changes also clear stale locked-shot rejection text.
+    setLockedShotNotice(null);
+  };
+
+  const resetShotConstraintReference = () => {
+    // Input changes outside the guarded angle path should clear stale feedback.
+    // Shared feedback cleanup keeps the inspector from showing stale results.
+    clearShotFeedback();
+  };
+
+  const validateLockedAngleCandidate = (candidateParams) => {
+    // Ghost mode never blocks candidate angle edits.
+    if (shotEditMode !== SHOT_MODE_LOCKED) return { allowed: true };
+    // Ray mode has no code-mode endpoint shot to protect.
+    if (simulatorMode !== 'code') return { allowed: true };
+    // Coordinate mode is not the symbolic x/y angle workflow.
+    if (baseInputMode !== 'angles') return { allowed: true };
+    // Empty code mode has no unfolded shot to protect.
+    if (!billiardsCode.trim()) return { allowed: true };
+    // Incomplete typing states would replace the constrained geometry with a fallback triangle.
+    if (!hasCompleteAngleParams(candidateParams)) return { allowed: false, reason: 'angle input is incomplete' };
+    // Non-triangular inputs are rejected in Constrained mode because they destroy the shot.
+    if (!hasValidAngleTriangle(candidateParams)) return { allowed: false, reason: 'triangle angles are invalid' };
+
+    // Build the candidate triangle without committing it to React state.
+    const candidateTriangle = buildBaseTriangle('angles', baseCoordsInput, candidateParams);
+    // Unfold the current code against the candidate triangle.
+    const candidateCodeData = unfoldCodeData(billiardsCode, candidateTriangle, true);
+    // Validate the candidate against the formal tower-separation rule before render.
+    const candidateSelfValidation = buildPoolshotTowerValidation({ simulatorMode: 'code', baseTriangle: candidateTriangle, activeTriangles: candidateCodeData.triangles, labelsMap: candidateCodeData.idxToAngle, reflectionEdges: candidateCodeData.reflectionEdges, clearanceEpsilon });
+    // Reject any candidate ray that is intrinsically invalid.
+    if (candidateSelfValidation.status === 'invalid') {
+      // Use the first self-validation violation to explain the rejection.
+      const firstViolation = candidateSelfValidation.violations[0];
+      // Build a concise human-readable rejection message.
+      const reason = firstViolation ? `${firstViolation.triId} ${firstViolation.vertexName || firstViolation.symbol} expected ${firstViolation.expected}` : 'candidate ray failed tower separation';
+      // Reject before the angle state can render the bad ray.
+      return { allowed: false, reason };
     }
+    // Valid candidate rays may be committed.
+    return { allowed: true };
+  };
 
-    // A zero-length endpoint line cannot separate above/below fan vertices.
-    if (lineLength < 1e-12) {
-      return {
-        status: 'invalid',
-        checked: 0,
-        violations: [{ triId: 'trajectory', symbol: 'x', expected: 'nonzero line', side: 0 }]
-      };
+  const handleAngleParamChange = (field, value) => {
+    // Candidate state mirrors what React would store if the edit is accepted.
+    const candidateParams = { ...angleParams, [field]: value };
+    // Ask Constrained mode whether this candidate can be committed.
+    const guard = validateLockedAngleCandidate(candidateParams);
+    // Reject invalid candidates before they change the rendered geometry.
+    if (!guard.allowed) {
+      // Store the blocked field/value and first separation reason.
+      setLockedShotNotice({ field, value, reason: guard.reason });
+      // Leave angleParams unchanged so the last valid geometry remains active.
+      return;
     }
+    // Commit accepted edits to the normal angle state.
+    clearShotFeedback();
+    // Store the accepted angle state.
+    setAngleParams(candidateParams);
+  };
 
-    // Validate the base triangle and every reflected copy.
-    const allTris = [baseTriangle, ...activeTriangles];
-    // These side assignments encode the current prototype convention.
-    const expectedVertices = [
-      { symbol: 'y', idx: yVertexIdx, side: 1, expected: 'above' },
-      { symbol: 'z', idx: zVertexIdx, side: -1, expected: 'below' }
-    ];
-
-    // Deduplicate repeated coordinates so shared unfolded vertices count once.
-    const seen = new Set();
-    // Keep only the first few violations for readable sidebar output.
-    const violations = [];
-    // Count unique fan vertices checked for the status summary.
-    let checked = 0;
-
-    // Walk every triangle copy in unfolded order.
-    for (const tri of allTris) {
-      // Check each fan symbol expected by the validator.
-      for (const expected of expectedVertices) {
-        // Pull the current physical vertex for this symbolic fan label.
-        const p = tri.points[expected.idx];
-        // Skip malformed triangles defensively.
-        if (!p) continue;
-        // Allow the shot endpoint itself to lie on the line at the beginning/end.
-        if (
-          expected.idx === shotVertexIdx
-          && (tri.id === 'T0' || tri.id === activeTriangles[activeTriangles.length - 1].id)
-        ) {
-          continue;
-        }
-
-        // Round for stable dedup keys without making validation itself rounded.
-        const key = `${expected.symbol}:${p.x.toFixed(10)},${p.y.toFixed(10)}`;
-        // Skip shared vertices already checked under this symbol.
-        if (seen.has(key)) continue;
-        // Record this coordinate/symbol pair as checked.
-        seen.add(key);
-
-        // Count this unique fan vertex.
-        checked++;
-        // Use signed area against the shot endpoint line.
-        const side = lineDx * (p.y - startShot.y) - lineDy * (p.x - startShot.x);
-        // Compare against strict above/below expectation.
-        const valid = expected.side > 0
-          ? side > lineSideTolerance
-          : side < -lineSideTolerance;
-
-        // Store enough context for the sidebar if this fan vertex fails.
-        if (!valid && violations.length < 12) {
-          violations.push({
-            triId: tri.id,
-            symbol: expected.symbol,
-            expected: expected.expected,
-            side,
-            point: p
-          });
-        }
-      }
-    }
-
-    // The shot is valid exactly when every required fan vertex passes.
-    return {
-      status: violations.length === 0 ? 'valid' : 'invalid',
-      checked,
-      violations
-    };
-  }, [
-    simulatorMode,
-    activeTriangles,
-    baseTriangle,
-    yVertexIdx,
-    zVertexIdx,
-    shotVertexIdx,
-    lineLength,
-    lineSideTolerance,
-    lineDx,
-    lineDy,
-    startShot.x,
-    startShot.y
-  ]);
+  const handleStableRegionSearch = () => {
+    // Store a running state immediately so the button gives feedback during computation.
+    setStableRegionResult({ status: 'running', message: 'Searching local x/y region...' });
+    // Compute the bounded local stability region synchronously from the current state.
+    const result = findStableRegion({ angleParams, labelsMap, billiardsCode, currentCodeData: codeData, clearanceEpsilon });
+    // Store the result for the inspector panel.
+    setStableRegionResult(result);
+  };
 
   // --- INTERACTION HANDLERS ---
   const handleMouseDown = (e) => {
@@ -826,14 +1614,14 @@ export default function App() {
               </h2>
               <div className="flex bg-[#0b1016] p-0.5 rounded-md border border-white/10">
                 <button
-                  onClick={() => setBaseInputMode('coords')}
+                  onClick={() => { resetShotConstraintReference(); setBaseInputMode('coords'); }}
                   title="Enter all three triangle vertices as coordinates."
                   className={`px-2 py-1 text-[10px] font-bold rounded ${baseInputMode === 'coords' ? 'bg-cyan-400/15 text-cyan-100 shadow-sm' : 'text-slate-500 hover:text-slate-200'}`}
                 >
                   Coordinates
                 </button>
                 <button
-                  onClick={() => setBaseInputMode('angles')}
+                  onClick={() => { resetShotConstraintReference(); setBaseInputMode('angles'); }}
                   title="Enter two angles and a base length."
                   className={`px-2 py-1 text-[10px] font-bold rounded ${baseInputMode === 'angles' ? 'bg-cyan-400/15 text-cyan-100 shadow-sm' : 'text-slate-500 hover:text-slate-200'}`}
                 >
@@ -850,11 +1638,13 @@ export default function App() {
                     <input type="text" value={baseCoordsInput[i].x} onChange={e => {
                       const newCoords = [...baseCoordsInput];
                       newCoords[i].x = e.target.value;
+                      resetShotConstraintReference();
                       setBaseCoordsInput(newCoords);
                     }} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 placeholder:text-slate-600 transition-all" placeholder="x" />
                     <input type="text" value={baseCoordsInput[i].y} onChange={e => {
                       const newCoords = [...baseCoordsInput];
                       newCoords[i].y = e.target.value;
+                      resetShotConstraintReference();
                       setBaseCoordsInput(newCoords);
                     }} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 placeholder:text-slate-600 transition-all" placeholder="y" />
                   </div>
@@ -864,22 +1654,27 @@ export default function App() {
               <div className="space-y-2.5">
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] font-bold text-slate-500 w-16 text-right mr-1">Base Length</span>
-                  <input type="number" step="0.1" value={angleParams.length} onChange={e => setAngleParams({...angleParams, length: e.target.value})} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all" />
+                  <input type="number" step="0.1" value={angleParams.length} onChange={e => handleAngleParamChange('length', e.target.value)} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all" />
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] font-bold text-slate-500 w-16 text-right mr-1">Angle A</span>
                   <div className="relative w-full">
-                    <input type="number" step="0.1" value={angleParams.a} onChange={e => setAngleParams({...angleParams, a: e.target.value})} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all pr-6" />
+                    <input type="number" step="0.1" value={angleParams.a} onChange={e => handleAngleParamChange('a', e.target.value)} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all pr-6" />
                     <span className="absolute right-2 top-1.5 text-slate-500 font-mono text-xs">&deg;</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] font-bold text-slate-500 w-16 text-right mr-1">Angle B</span>
                   <div className="relative w-full">
-                    <input type="number" step="0.1" value={angleParams.b} onChange={e => setAngleParams({...angleParams, b: e.target.value})} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all pr-6" />
+                    <input type="number" step="0.1" value={angleParams.b} onChange={e => handleAngleParamChange('b', e.target.value)} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all pr-6" />
                     <span className="absolute right-2 top-1.5 text-slate-500 font-mono text-xs">&deg;</span>
                   </div>
                 </div>
+                {lockedShotNotice && (
+                  <div className="text-[10px] text-amber-100 mt-1 pl-16 font-medium bg-amber-500/10 rounded py-1.5 px-2 border border-amber-300/20">
+                    Constrained blocked {lockedShotNotice.field}={lockedShotNotice.value}: {lockedShotNotice.reason}.
+                  </div>
+                )}
                 {(Number(angleParams.a) + Number(angleParams.b) >= 180) && (
                   <div className="text-[10px] text-red-200 mt-1 pl-16 text-center font-medium bg-red-500/10 rounded py-1 border border-red-400/20">Angles must sum &lt; 180&deg;</div>
                 )}
@@ -935,21 +1730,74 @@ export default function App() {
               </p>
               <textarea 
                 value={billiardsCode}
-                onChange={e => setBilliardsCode(e.target.value)}
+                onChange={e => { resetShotConstraintReference(); setBilliardsCode(e.target.value); }}
                 className="w-full bg-[#0b1016] border border-white/10 rounded-md p-2.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono resize-none h-20 text-slate-100 shadow-inner placeholder:text-slate-600"
                 placeholder="e.g. 1 5 16 5 1 2 3 6"
               />
+              <div className="mt-4 grid grid-cols-2 gap-1 rounded-lg border border-white/10 bg-[#0b1016] p-1">
+                <button
+                  onClick={() => { setLockedShotNotice(null); setShotEditMode(SHOT_MODE_LOCKED); }}
+                  title="Reject angle edits before they can make the current code-mode shot invalid."
+                  className={`rounded-md px-2 py-1.5 text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 ${shotEditMode === SHOT_MODE_LOCKED ? 'bg-emerald-400/15 text-emerald-100 shadow-sm' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'}`}
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" /> Constrained
+                </button>
+                <button
+                  onClick={() => { setLockedShotNotice(null); setShotEditMode(SHOT_MODE_PREVIEW); }}
+                  title="Allow invalid shots and render them in ghost mode."
+                  className={`rounded-md px-2 py-1.5 text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 ${shotEditMode === SHOT_MODE_PREVIEW ? 'bg-slate-300/15 text-slate-100 shadow-sm' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'}`}
+                >
+                  <Eye className="w-3.5 h-3.5" /> Ghost
+                </button>
+              </div>
+              <div className="mt-3 grid grid-cols-[1fr_auto] gap-2 items-end">
+                <label className="block">
+                  <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500 block mb-1">Separation Epsilon</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.0000000001"
+                    value={clearanceEpsilonInput}
+                    onChange={e => { resetShotConstraintReference(); setClearanceEpsilonInput(e.target.value); }}
+                    className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-xs focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all"
+                  />
+                </label>
+                <button
+                  onClick={handleStableRegionSearch}
+                  disabled={baseInputMode !== 'angles' || shotClearanceValidation.status !== 'valid'}
+                  title="Search the local symbolic x/y angle region that preserves the current valid shot."
+                  className="h-[34px] px-2.5 rounded-md border border-cyan-300/25 bg-cyan-400/10 text-cyan-100 hover:bg-cyan-400/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
+                >
+                  <Search className="w-4 h-4" />
+                </button>
+              </div>
+              {stableRegionResult && (
+                <div className={`mt-3 rounded-md border px-2.5 py-2 text-[10px] leading-relaxed ${stableRegionResult.status === 'found' ? 'border-cyan-300/20 bg-cyan-400/10 text-cyan-100' : stableRegionResult.status === 'running' ? 'border-slate-300/20 bg-slate-400/10 text-slate-200' : 'border-amber-300/20 bg-amber-500/10 text-amber-100'}`}>
+                  {stableRegionResult.status === 'found' ? (
+                    <div className="font-mono">
+                      x in ({stableRegionResult.intervals.xMin.toFixed(6)}, {stableRegionResult.intervals.xMax.toFixed(6)})<br />
+                      y in ({stableRegionResult.intervals.yMin.toFixed(6)}, {stableRegionResult.intervals.yMax.toFixed(6)})
+                      <span className="block mt-1 text-slate-400">step={stableRegionResult.step} visits={stableRegionResult.visits}{stableRegionResult.capped ? ' capped' : ''}</span>
+                    </div>
+                  ) : (
+                    <div className="flex gap-1.5 items-start">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      <span>{stableRegionResult.message || 'Stable region search did not return an interval.'}</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
           {/* ANALYTICS & DATA LOGS */}
           <div className="px-3 pb-8">
             
-            {/* Code-mode shot line, matching the red endpoint segment drawn on the canvas. */}
+            {/* Code-mode shot vector, matching the colored endpoint segment drawn on the canvas. */}
             {simulatorMode === 'code' && activeTriangles.length > 0 && (
               <div className="mb-3 bg-[#151c24] p-4 rounded-lg border border-white/10 shadow-[0_8px_28px_rgba(0,0,0,0.22)]">
                 <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-400 mb-3 flex items-center gap-1.5">
-                  <Compass className="w-3 h-3 text-cyan-300"/> Shot Line ({shotSymbol}/A)
+                  <Compass className="w-3 h-3 text-cyan-300"/> Shot Vector ({shotSymbol}/A)
                 </h3>
                 <div className="flex flex-col gap-2">
                   <div className="flex justify-between items-center border-b border-white/10 pb-2">
@@ -969,35 +1817,40 @@ export default function App() {
             )}
 
             {simulatorMode === 'code' && activeTriangles.length > 0 && (
-              <div className={`mb-3 p-4 rounded-lg border shadow-[0_8px_28px_rgba(0,0,0,0.22)] ${fanValidation.status === 'valid' ? 'bg-emerald-500/10 border-emerald-300/25' : 'bg-red-500/10 border-red-300/25'}`}>
+              <div className={`mb-3 p-4 rounded-lg border shadow-[0_8px_28px_rgba(0,0,0,0.22)] ${shotClearanceValidation.status === 'valid' ? 'bg-emerald-500/10 border-emerald-300/25' : 'bg-red-500/10 border-red-300/25'}`}>
                 <div className="flex items-start justify-between gap-3">
                   <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-300 mb-2 flex items-center gap-1.5">
-                    {fanValidation.status === 'valid' ? (
+                    {shotClearanceValidation.status === 'valid' ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-300" />
                     ) : (
                       <XCircle className="w-3.5 h-3.5 text-red-300" />
                     )}
-                    Fan Validator
+                    Tower Separation
                   </h3>
-                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${fanValidation.status === 'valid' ? 'text-emerald-100 border-emerald-300/25 bg-emerald-400/10' : 'text-red-100 border-red-300/25 bg-red-400/10'}`}>
-                    {fanValidation.status === 'valid' ? 'VALID' : 'INVALID'}
+                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${shotClearanceValidation.status === 'valid' ? 'text-emerald-100 border-emerald-300/25 bg-emerald-400/10' : 'text-red-100 border-red-300/25 bg-red-400/10'}`}>
+                    {shotClearanceValidation.status === 'valid' ? 'VALID' : 'INVALID'}
                   </span>
                 </div>
                 <div className="text-[11px] text-slate-400 leading-relaxed">
-                  Checked <span className="font-mono text-slate-200">{fanValidation.checked}</span> unique fan vertices:
-                  <span className="font-mono text-emerald-300"> y above</span>,
-                  <span className="font-mono text-emerald-300"> z below</span>.
+                  Checked <span className="font-mono text-slate-200">{shotClearanceValidation.checked}</span> A/B/C occurrences:
+                  <span className="font-mono text-sky-300"> blue {shotClearanceValidation.stats.blue}</span>,
+                  <span className="font-mono text-red-300"> red {shotClearanceValidation.stats.red}</span>,
+                  <span className="font-mono text-yellow-300"> uncolored {shotClearanceValidation.stats.uncolored}</span>,
+                  <span className="font-mono text-slate-500"> endpoints {shotClearanceValidation.stats.endpoints}</span>.
                   <div className="mt-1 text-[10px] text-slate-500">
-                    Red line: <span className="font-mono text-slate-300">first {shotSymbol}/A to final {shotSymbol}/A</span>
+                    Vector: <span className="font-mono text-slate-300">first {shotSymbol}/A to final {shotSymbol}/A</span>
+                    <span className="font-mono text-slate-500"> | margin {shotClearanceValidation.stats.separationMargin.toExponential(2)}</span>
+                    <span className="font-mono text-slate-500"> | epsilon hits {shotClearanceValidation.stats.epsilonBand}</span>
+                    <span className="font-mono text-slate-500"> | {shotEditMode === SHOT_MODE_LOCKED ? 'Constrained' : 'Ghost'}</span>
                   </div>
                 </div>
-                {fanValidation.violations.length > 0 && (
+                {shotClearanceValidation.violations.length > 0 && (
                   <div className="mt-3 space-y-1.5">
-                    {fanValidation.violations.slice(0, 3).map((violation, idx) => (
+                    {shotClearanceValidation.violations.slice(0, 3).map((violation, idx) => (
                       <div key={`${violation.triId}-${violation.symbol}-${idx}`} className="rounded-md border border-red-300/20 bg-[#0b1016]/80 px-2 py-1.5 text-[10px] text-red-100">
                         <span className="font-mono font-bold">{violation.triId}</span>
-                        <span className="font-mono"> {violation.symbol}</span> expected {violation.expected}; side =
-                        <span className="font-mono"> {violation.side.toExponential(2)}</span>
+                        <span className="font-mono"> {violation.symbol}</span> expected {violation.expected}; score =
+                        <span className="font-mono"> {violation.score.toExponential(2)}</span>
                       </div>
                     ))}
                   </div>
@@ -1112,8 +1965,9 @@ export default function App() {
                   key={tri.id}
                   points={`${tri.points[0].x},${tri.points[0].y} ${tri.points[1].x},${tri.points[1].y} ${tri.points[2].x},${tri.points[2].y}`}
                   fill={tri.color}
-                  fillOpacity="0.1"
+                  fillOpacity={isGhostedShot ? 0.035 : 0.1}
                   stroke={tri.color}
+                  strokeOpacity={isGhostedShot ? 0.35 : 1}
                   strokeWidth={2.2 / zoom} 
                   strokeLinejoin="round"
                 />
@@ -1145,10 +1999,10 @@ export default function App() {
                   <line
                     x1={startShot.x} y1={startShot.y}
                     x2={finalShot.x} y2={finalShot.y}
-                    stroke="#dc2626" strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round"
+                    stroke={shotLineColor} strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round" opacity={isGhostedShot ? 0.78 : 1}
                   />
-                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill="#22c55e" stroke="#dc2626" strokeWidth={1.5 / zoom} />
-                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill="#22c55e" stroke="#dc2626" strokeWidth={1.5 / zoom} />
+                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill={VALID_SHOT_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
+                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill={VALID_SHOT_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
                 </g>
               )}
             </g>
@@ -1161,56 +2015,51 @@ export default function App() {
                 const allTris = [baseTriangle, ...activeTriangles];
 
                 for (const tri of allTris) {
-                  for (const vertexIdx of [yVertexIdx, zVertexIdx]) {
+                  for (const vertexIdx of [0, 1, 2]) {
                     const symbol = labelsMap[vertexIdx];
                     const p = tri.points[vertexIdx];
-                    if (!p || (symbol !== 'y' && symbol !== 'z')) continue;
-                    if (
-                      vertexIdx === shotVertexIdx
-                      && (tri.id === 'T0' || tri.id === activeTriangles[activeTriangles.length - 1].id)
-                    ) {
-                      continue;
-                    }
+                    if (!p) continue;
 
-                    const key = `${symbol}:${p.x.toFixed(10)},${p.y.toFixed(10)}`;
+                    const key = getClearanceOccurrenceKey(tri.id, vertexIdx, symbol);
                     if (seen.has(key)) continue;
                     seen.add(key);
 
-                    const validation = getFanPointValidation(p, symbol);
+                    const validation = getClearancePointValidation(tri.id, vertexIdx, symbol);
                     if (!validation) continue;
 
                     const cx = toSvgX(p.x);
                     const cy = toSvgY(p.y);
                     const radius = validation.valid ? 4 : 6;
+                    const showLabel = true;
 
                     markers.push(
-                      <g key={`fan-mark-${key}`}>
+                      <g key={`clearance-mark-${key}`}>
                         <circle
                           cx={cx}
                           cy={cy}
                           r={radius + 2}
                           fill={validation.ring}
-                          opacity={validation.valid ? 0.45 : 0.85}
+                          opacity={validation.valid ? 0.28 : 0.85}
                         />
                         <circle
                           cx={cx}
                           cy={cy}
                           r={radius}
                           fill={validation.color}
-                          opacity={validation.valid ? 0.78 : 1}
+                          opacity={validation.valid ? 0.82 : 1}
                         />
-                        {!validation.valid && (
+                        {showLabel && (
                           <text
                             x={cx}
                             y={cy + 0.5}
-                            fill="#fff1f2"
+                            fill={validation.valid ? '#07111f' : '#fff1f2'}
                             fontSize="8"
                             fontWeight="900"
                             textAnchor="middle"
                             alignmentBaseline="middle"
                             className="font-mono"
                           >
-                            {symbol}
+                            {validation.vertexName}
                           </text>
                         )}
                       </g>
@@ -1298,32 +2147,23 @@ export default function App() {
                           renderedCoords.add(coordKey);
                           const vertexName = ['A', 'B', 'C'][i];
                           
-                          // Dynamic vertex coloring logic based on the fan-side validator
+                          // Dynamic vertex coloring logic based on the all-vertex tower validator.
                           let vColor = isDerived ? tri.color : '#e2e8f0';
-                          let isStartOrFinal = false;
+                          let vertexRadius = isDerived ? 4 : 5;
 
-                          if (activeTriangles.length > 0) {
-                            const isStartShot = tri.id === 'T0' && i === shotVertexIdx;
-                            const isFinalShot = tri.id === activeTriangles[activeTriangles.length - 1].id && i === shotVertexIdx;
+                          if (simulatorMode === 'code' && activeTriangles.length > 0) {
                             const symbol = labelsMap[i];
-                            const fanPointValidation = getFanPointValidation(p, symbol);
+                            const clearancePointValidation = getClearancePointValidation(tri.id, i, symbol);
                             
-                            if (isStartShot || isFinalShot) {
-                              vColor = '#22c55e'; // Green for the actual shot endpoints
-                              isStartOrFinal = true;
-                            } else if (fanPointValidation) {
-                              vColor = fanPointValidation.color;
-                            } else {
-                              const side = getLineSide(p);
-                              if (side > lineSideTolerance) vColor = '#38bdf8';
-                              else if (side < -lineSideTolerance) vColor = '#e5e7eb';
-                              else vColor = '#facc15';
+                            if (clearancePointValidation) {
+                              vColor = clearancePointValidation.color;
+                              vertexRadius = clearancePointValidation.valid ? vertexRadius : 6;
                             }
                           }
 
                           labelsToRender.push(
                             <g key={`lbl-${isDerived ? 'derived-' : ''}${tri.id}-${i}`}>
-                              <circle cx={cx} cy={cy} r={isStartOrFinal ? 6 : (isDerived ? 4 : 5)} fill={vColor} opacity={1} />
+                              <circle cx={cx} cy={cy} r={vertexRadius} fill={vColor} opacity={1} />
                               <text 
                                 x={cx + 8} 
                                 y={cy - 6} 

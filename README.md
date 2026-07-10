@@ -15,6 +15,10 @@ proof-grade exact arithmetic validator.
 - Triangle input by coordinates or by two angles plus base length.
 - Ray simulator from a selected vertex and angle.
 - Code unfolder for whitespace-separated integer bounce-block counts.
+- Constrained mode that rejects angle edits before they invalidate the current code-mode shot.
+- Ghost mode that allows invalid shots, ghosts the unfolding, and colors the shot vector green/red by validity.
+- Paper-style all-vertex tower validation with formal blue/red vertex roles and determinant separation.
+- Local stable-region search for symbolic `x` and `y` angle perturbations.
 - Generated side sequence, parsed symbolic sequence, and vertex coordinate logs.
 
 ## Development

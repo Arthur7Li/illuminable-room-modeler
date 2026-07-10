@@ -46,14 +46,27 @@ the cross-file architecture map.
 - Implements two simulation paths:
   - ray mode: fixed ray through reflected triangles;
   - code mode: integer-code parser plus heuristic reflection chain.
-- Uses a physical shot endpoint line from first `A` to final `A`; in the default
-  symbolic mapping this is the `z/A` endpoint the user identified.
-- Validates fan vertices by signed cross product:
-  - positive side means the point is left/above the oriented red line;
-  - negative side means the point is right/below the oriented red line;
-  - tolerance-band points are invalid because the desired condition is strict.
-- Excludes the first and final shot endpoint from fan-obstacle validation because
-  they are supposed to lie on the red line.
+- Uses the vector from first physical `A` to final reflected physical `A` as the
+  code-mode shot direction; the validator tests separation parallel to that
+  vector rather than assigning sides from the literal endpoint line.
+- Validates every physical `A`, `B`, and `C` occurrence by the paper-style tower
+  test:
+  - `A0` is formal blue and `B0` is formal black;
+  - each recorded reflection edge propagates opposite formal colors across the
+    tower side;
+  - the final reflected `AB` side colors the terminal side of the tower;
+  - physical `C` occurrences are tracked by triangle id plus vertex index, not by
+    their changing coordinates;
+  - the determinant margin `min(det(red,w)) - max(det(blue,w))` must exceed the
+    epsilon-scaled tolerance.
+- Supports Constrained mode, which validates a proposed angle edit before
+  committing it to React state and rejects edits that fail the tower test.
+- Supports Ghost mode, which allows invalid geometry, ghosts the unfolding, and
+  colors the shot vector green for valid or red for invalid.
+- Searches a bounded local symbolic `x`/`y` angle region using progressively
+  finer grid steps and the same tower-separation validator as the live view.
+- Displays first/final shot endpoint occurrences with formal colors while
+  ignoring those endpoint coordinates as obstruction contributors.
 - Renders geometry in mathematical coordinates inside a flipped SVG group.
 - Renders labels and validator markers in screen space so text remains readable
   independent of zoom.
@@ -115,24 +128,30 @@ the cross-file architecture map.
   direction-reflection state.
 - Code mode currently uses a heuristic edge sequence rather than a proof-grade
   legal-code validator.
-- The red shot line is endpoint-defined: first physical `A` to final physical
-  `A`, currently corresponding to symbolic `z/A` in the default mapping.
-- The fan validator uses cross products instead of slope division because cross
-  products also work for vertical lines and avoid division-by-zero cases.
+- The colored shot vector is endpoint-defined: first physical `A` to final
+  physical `A`, currently corresponding to symbolic `z/A` in the default
+  mapping.
+- The tower validator uses 2D determinants instead of slope division because
+  determinants also work for vertical vectors and directly encode the paper's
+  `det(red - blue, shotVector) > 0` condition.
 
 ## Color Semantics
 
-- Red dashed line: proposed shot line.
+- Green dashed vector: currently valid code-mode shot vector.
+- Red dashed vector: currently invalid code-mode shot vector.
 - Green endpoint circles: first and final shot vertices.
-- Green fan markers: fan vertices satisfying their required side condition.
-- Red fan markers: fan vertices violating their required side condition.
-- Yellow hover points: points close to the validation boundary.
+- Blue markers: formal blue tower vertices.
+- Red markers: formal black tower vertices, rendered red for contrast.
+- Yellow markers: vertices that the tower side-color propagation could not classify.
+- Red rings/labels: vertices violating the strict determinant separation condition.
 - Muted multicolor triangles: reflected triangle chain.
+- Ghosted triangles: invalid Ghost geometry that is being inspected but would be
+  rejected by Constrained mode.
 
 ## Technical Debt Boundaries
 
 - The app is still floating-point and exploratory.
 - The code parser is not a canonical billiards code validator.
-- The fan-side predicate is strict but not proof-grade exact arithmetic.
+- The determinant separation predicate is strict but not proof-grade exact arithmetic.
 - A future proof backend should receive structured points/code data rather than
   reading rendered SVG state.

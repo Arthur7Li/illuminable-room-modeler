@@ -659,11 +659,13 @@ The output shown in the UI:
 
 - `parsedSequence`: each count with its symbolic angle label.
 - `sideSequence`: each actual side crossed/reflected, using side labels `1, 2, 3`.
+- `reflectionEdges`: each physical edge index crossed/reflected, using edge
+  indices `0, 1, 2`; the formal tower-color validator uses this because side
+  labels alone are display-oriented.
 - `triangles`: reflected triangle copies.
-- final shot endpoint coordinate and global angle from the original physical `A`
-  to the final physical `A`. Under the default angle mapping this endpoint is
-  displayed as `z/A`, which is the intended first green vertex to ending green
-  vertex red line.
+- final shot-vector endpoint coordinate and global angle from the original
+  physical `A` to the final physical `A`. Under the default angle mapping this
+  endpoint is displayed as `z/A`.
 
 ## Rendering And Interaction Algorithms
 
@@ -688,10 +690,138 @@ finalShot = activeTriangles[last].points[shotVertexIdx] if any reflected triangl
 line = startShot -> finalShot
 ```
 
-That line is the main visual trajectory proxy in code mode. It is deliberately
-defined by the first green endpoint and the ending green endpoint, not by a
-symbolic `x -> x` convention. In the default conjecture-oriented setup,
-physical `A` carries symbolic label `z`, so the sidebar shows this as `z/A`.
+That vector is the main visual trajectory proxy in code mode. The validator does
+not infer top/bottom roles from the literal line through these two endpoints.
+Instead it uses this vector as the direction for the paper's tower separation
+test. In the default conjecture-oriented setup, physical `A` carries symbolic
+label `z`, so the sidebar shows this vector as `z/A`.
+
+### Tower Separation Validation
+
+The validator follows the unfolding-tower rules from `Obtuse Billiards.pdf`:
+
+1. `A0` is formal blue.
+2. `B0` is formal black, rendered red in this UI.
+3. When a reflected tower side has one endpoint already colored, the other
+   endpoint receives the opposite formal color.
+4. The recorded `reflectionEdges` provide the exact tower sides used for this
+   propagation.
+5. The two sides incident to final reflected physical `A` are treated as
+   terminal sides, because the visual shot ends at the singular final `A`
+   endpoint and either incident side can complete the displayed tower strip.
+
+After formal coloring, every physical `A`, `B`, and `C` occurrence is validated.
+Occurrences are keyed by triangle id, physical vertex index, and symbolic label,
+so physical `C` vertices are tracked even when their coordinates move under angle
+perturbation.
+
+For a shot vector `w = finalShot - startShot`, each vertex point `p` receives a
+determinant score:
+
+```text
+score(p) = det(p, w) = p.x * w.y - p.y * w.x
+```
+
+The paper's pairwise condition `det(red - blue, w) > 0` for every blue/red pair
+is equivalent to:
+
+```text
+min(score(red vertices)) > max(score(blue vertices)) + tolerance
+```
+
+The epsilon input is a perpendicular-distance tolerance in mathematical units.
+The implementation multiplies it by the shot-vector length so it can compare in
+determinant units. A tiny floating-point floor remains in place so exact-boundary
+tests are not dominated by roundoff.
+
+Endpoint coordinates are not skipped for coloring or display. They are, however,
+ignored as obstruction contributors because the visual shot definitionally starts
+and ends at those singular coordinates. This prevents the final `A` occurrence
+from invalidating its own shot while still allowing all non-endpoint `A`, `B`,
+and `C` occurrences to participate in the determinant margin.
+
+Pseudocode:
+
+```text
+function validateShot(baseTriangle, activeTriangles, labelsMap, epsilon):
+    shotVector = final physical A - first physical A
+    tolerance = max(1e-12, length(shotVector) * epsilon)
+    colors = propagateTowerColors(baseTriangle, activeTriangles, reflectionEdges)
+    maxBlue = -infinity
+    minRed = infinity
+    for each triangle in [baseTriangle] + activeTriangles:
+        for each physical vertex index:
+            symbol = labelsMap[index]
+            occurrence = triangle.id + index + symbol
+            role = colors[occurrence]
+            if role is missing:
+                invalid
+            score = det(vertex, shotVector)
+            if role == blue:
+                maxBlue = max(maxBlue, score)
+            if role == red:
+                minRed = min(minRed, score)
+    if minRed <= maxBlue + tolerance:
+        invalid
+```
+
+The tower-color propagation step is:
+
+```text
+function propagateTowerColors(baseTriangle, activeTriangles, reflectionEdges):
+    color(base A) = blue
+    color(base B) = red
+    for each reflected triangle:
+        edge = reflectionEdges[i]
+        on the previous triangle, color unknown endpoint of edge as opposite
+        copy both endpoint colors across the shared reflected edge
+        on the new triangle, require/copy opposite colors across the same edge
+    on the final reflected triangle:
+        color both sides incident to final physical A by the same rule
+    during determinant validation:
+        display endpoint coordinates, but do not include them in maxBlue/minRed
+```
+
+### Constrained And Ghost Shot
+
+Constrained mode protects the current valid code-mode shot by validating the
+proposed candidate against the tower separation predicate before React state is
+updated. If the candidate is invalid, the input is rejected and the last valid
+geometry remains visible. This is what prevents an angle increment from rendering
+an invalid A/B shot in constrained mode.
+
+Ghost mode allows invalid candidates. Invalid Ghost geometry is rendered with
+lower-opacity reflected triangles and a red shot vector so the failure can be
+inspected without confusing it for a constrained valid state. Valid Ghost
+geometry uses the same green shot vector as constrained valid geometry.
+
+### Stable Region Search
+
+The `Find Stable Region` command searches a bounded local connected region in
+symbolic `x` and `y` angle space. It keeps the current symbolic-to-physical
+mapping, side sequence, and all-vertex tower-separation predicate fixed. It refines the
+grid at `0.1`, `0.01`, and `0.001` degree steps and returns open intervals for
+the discovered local component.
+
+This is a floating-point exploratory region finder, not interval arithmetic. It
+has a local radius and per-step visit cap to prevent browser lockups.
+
+Pseudocode:
+
+```text
+function findStableRegion(centerX, centerY):
+    for step in [0.1, 0.01, 0.001]:
+        bfs from current x,y sample
+        reject candidates outside local window
+        reject candidates with nonpositive x, y, or z = 180 - x - y
+        rebuild the physical triangle from symbolic x,y,z
+        unfold the same code
+        require same label map and same side sequence
+        require tower separation to be valid
+        collect min/max valid x and y samples
+        shrink next search window around the valid component
+    return open intervals expanded by the final step
+```
 
 ### Fit To Screen
 
@@ -796,11 +926,18 @@ Hover labels:
 
 Vertex color logic:
 
-- Original `A` and final reflected `A` are highlighted red.
-- Other points are colored by whether they are above or below the `A -> final A`
-  trajectory line.
-- Derived triangle labels use that triangle's color when no trajectory override
-  applies.
+- Original `A` and final reflected `A` still get green endpoint circles on the
+  drawn shot vector.
+- The code-mode shot vector is green when tower separation is valid and red when
+  it is invalid.
+- Formal blue tower vertices are blue.
+- Formal black tower vertices are rendered red.
+- Vertices without a propagated formal color are yellow and invalid.
+- Invalid separation-boundary vertices receive a red ring/label while keeping
+  their formal role color visible.
+- Invalid Ghost geometry is ghosted by lowering reflected-triangle opacity.
+- Derived triangle labels use that triangle's color when no code-mode tower
+  validation override applies.
 
 ## Relationship To The Parent Billiards Project
 
@@ -842,6 +979,14 @@ The current app already improves on a naive attempt in several practical ways:
   triangle from angles after every step.
 - It records the actual side sequence while reflecting, so the geometric picture
   and the side-code output can be compared.
+- It validates every formal tower-colored `A`, `B`, and `C` occurrence rather
+  than assuming fan vertices are the only relevant obstruction.
+- It can reject invalid angle edits in Constrained mode before they update the
+  rendered geometry.
+- It can inspect invalid candidates in Ghost mode without losing the
+  visual distinction between constrained and exploratory states.
+- It can estimate a bounded local stable `x`/`y` angle region for the current
+  code and tower-separation condition.
 - It caches expensive derived geometry with React `useMemo`.
 - It caps code-mode output at 3000 triangles to avoid locking the browser.
 - It renders text labels in screen space, so zooming does not make labels vanish
@@ -872,6 +1017,11 @@ constraints: x > 0, y > 0, y < z, 90 / x is integer
 
 - The app should implement a formal invisible-point predicate before claiming
   validation.
+- The current stable-region search is local, capped, and grid-based; it should
+  not be confused with the exact rational/interval region machinery in the
+  parent project.
+- The current separation epsilon is a floating-point determinant tolerance, not
+  a proof certificate.
 - Singular hits should be handled consistently in both ray and code modes.
 - If a future backend is added, the React app should pass a structured problem
   instance rather than relying on displayed floating-point coordinates.
@@ -883,8 +1033,8 @@ Use the app this way:
 1. Choose a triangle.
 2. Enter a finite code or ray.
 3. Let the app unfold the triangle chain by reflection.
-4. Inspect whether the straight `A -> final A` relationship and side sequence
-   match the intended poolshot/invisibility mechanism.
+4. Inspect whether the `A -> final A` shot vector, side sequence, and formal
+   blue/red tower separation match the intended poolshot/invisibility mechanism.
 5. Treat the result as a visual hypothesis generator, not a proof.
 
 The shortest accurate description is:
