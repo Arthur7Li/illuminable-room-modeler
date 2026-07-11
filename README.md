@@ -22,6 +22,7 @@ proof-grade exact arithmetic validator.
 - Ghost mode that allows invalid shots, ghosts the unfolding, and colors the shot vector green/red by validity.
 - Finite-poolshot tower validation with formal blue/red vertex roles, an all-vertex y-at-line check, and numeric fan bounds from the code blocks.
 - Local stable-region search for symbolic `x` and `y` angle perturbations.
+- Adjustable display precision, defaulting to 12 decimals for coordinate and angle readouts.
 - Generated side sequence, parsed symbolic sequence, and vertex coordinate logs.
 
 ## Development

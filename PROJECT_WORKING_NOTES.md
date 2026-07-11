@@ -959,6 +959,17 @@ Hover labels:
    midpoint labels.
 3. Deduplicate labels by rounded coordinate or midpoint.
 
+Display precision:
+
+1. The `Display Decimals` control defaults to 12 decimal places.
+2. Coordinate logs, hover coordinates, final endpoint coordinates, global
+   `atan2`, stable-region intervals, fan angles, and line-test diagnostics all
+   use the same display precision.
+3. The value is clamped to 0 through 15 decimals because the app uses browser
+   double-precision numbers.
+4. Internal stable-region cache keys keep their own rounding because that
+   rounding is part of the search algorithm, not the visible display format.
+
 Vertex color logic:
 
 - Original `A` and final reflected `A` still get green endpoint circles on the

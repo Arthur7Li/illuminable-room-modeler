@@ -64,6 +64,12 @@ const INVALID_SHOT_COLOR = '#ef4444';
 // The default clearance epsilon is a perpendicular-distance tolerance in math units.
 const DEFAULT_CLEARANCE_EPSILON = 1e-10;
 
+// Numeric readouts default to twelve decimal places for precise endpoint/angle inspection.
+const DEFAULT_DISPLAY_DECIMALS = 12;
+
+// JavaScript numbers carry about fifteen reliable decimal digits, so the UI clamps there.
+const MAX_DISPLAY_DECIMALS = 15;
+
 // Fan central angles must stay strictly below 180 degrees; this guards roundoff at the boundary.
 const FAN_ANGLE_TOLERANCE_DEGREES = 1e-9;
 
@@ -1304,6 +1310,8 @@ export default function App() {
   const [shotPathReference, setShotPathReference] = useState(null);
   // Persistent labels are useful for debugging dense unfolded fans.
   const [showAllLabels, setShowAllLabels] = useState(false);
+  // Display decimals are editable text so the field can be cleared/retyped without fighting React.
+  const [displayPrecisionInput, setDisplayPrecisionInput] = useState(String(DEFAULT_DISPLAY_DECIMALS));
 
   // --- VIEWPORT & INTERACTION STATE ---
   // Ref to the canvas container lets us measure available SVG pixels.
@@ -1374,6 +1382,36 @@ export default function App() {
     // Invalid or negative input falls back to the documented default.
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CLEARANCE_EPSILON;
   }, [clearanceEpsilonInput]);
+
+  const displayPrecision = useMemo(() => {
+    // Parse integer decimal places from the editable display precision field.
+    const parsed = Number(displayPrecisionInput);
+    // Blank or malformed precision falls back to the documented twelve-decimal default.
+    if (!Number.isFinite(parsed)) return DEFAULT_DISPLAY_DECIMALS;
+    // Fractional decimal counts are rounded down because toFixed() expects an integer.
+    const integerPrecision = Math.trunc(parsed);
+    // Clamp to the useful range for IEEE-754 browser numbers.
+    return Math.max(0, Math.min(integerPrecision, MAX_DISPLAY_DECIMALS));
+  }, [displayPrecisionInput]);
+
+  const formatFixed = (value) => {
+    // Non-finite geometry values should be visible instead of throwing in toFixed().
+    if (!Number.isFinite(value)) return String(value);
+    // Use the current user-selected decimal count for ordinary scalar readouts.
+    return value.toFixed(displayPrecision);
+  };
+
+  const formatExponential = (value) => {
+    // Non-finite diagnostics should be visible instead of throwing in toExponential().
+    if (!Number.isFinite(value)) return String(value);
+    // Exponential readouts use the same selected decimal count for consistency.
+    return value.toExponential(displayPrecision);
+  };
+
+  const formatPoint = (point) => {
+    // Points are consistently shown as x, y pairs throughout the inspector and hover labels.
+    return `${formatFixed(point.x)}, ${formatFixed(point.y)}`;
+  };
   
   const baseTriangle = useMemo(() => {
     // Use the shared pure builder so live rendering and candidate validation match.
@@ -1821,6 +1859,22 @@ export default function App() {
                 )}
               </div>
             )}
+
+            <div className="mt-3 pt-3 border-t border-white/10">
+              <label className="grid grid-cols-[1fr_88px] gap-2 items-center">
+                <span className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Display Decimals</span>
+                <input
+                  type="number"
+                  min="0"
+                  max={MAX_DISPLAY_DECIMALS}
+                  step="1"
+                  value={displayPrecisionInput}
+                  onChange={e => setDisplayPrecisionInput(e.target.value)}
+                  title={`Number of decimal places shown in readouts, clamped from 0 to ${MAX_DISPLAY_DECIMALS}.`}
+                  className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2 py-1.5 text-xs text-center focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all"
+                />
+              </label>
+            </div>
           </div>
 
           {/* SIMULATOR PARAMETERS */}
@@ -1916,9 +1970,9 @@ export default function App() {
                 <div className={`mt-3 rounded-md border px-2.5 py-2 text-[10px] leading-relaxed ${stableRegionResult.status === 'found' ? 'border-cyan-300/20 bg-cyan-400/10 text-cyan-100' : stableRegionResult.status === 'running' ? 'border-slate-300/20 bg-slate-400/10 text-slate-200' : 'border-amber-300/20 bg-amber-500/10 text-amber-100'}`}>
                   {stableRegionResult.status === 'found' ? (
                     <div className="font-mono">
-                      x in ({stableRegionResult.intervals.xMin.toFixed(6)}, {stableRegionResult.intervals.xMax.toFixed(6)})<br />
-                      y in ({stableRegionResult.intervals.yMin.toFixed(6)}, {stableRegionResult.intervals.yMax.toFixed(6)})
-                      <span className="block mt-1 text-slate-400">step={stableRegionResult.step} visits={stableRegionResult.visits}{stableRegionResult.capped ? ' capped' : ''}</span>
+                      x in ({formatFixed(stableRegionResult.intervals.xMin)}, {formatFixed(stableRegionResult.intervals.xMax)})<br />
+                      y in ({formatFixed(stableRegionResult.intervals.yMin)}, {formatFixed(stableRegionResult.intervals.yMax)})
+                      <span className="block mt-1 text-slate-400">step={formatFixed(stableRegionResult.step)} visits={stableRegionResult.visits}{stableRegionResult.capped ? ' capped' : ''}</span>
                     </div>
                   ) : (
                     <div className="flex gap-1.5 items-start">
@@ -1943,14 +1997,14 @@ export default function App() {
                 <div className="flex flex-col gap-2">
                   <div className="flex justify-between items-center border-b border-white/10 pb-2">
                     <span className="text-[11px] text-slate-500 font-medium">Final endpoint</span>
-                    <span className="text-xs font-mono text-slate-100 font-semibold bg-[#0b1016] px-2 py-0.5 rounded border border-white/10">
-                      {finalShot.x.toFixed(4)}, {finalShot.y.toFixed(4)}
+                    <span className="text-xs font-mono text-slate-100 font-semibold bg-[#0b1016] px-2 py-0.5 rounded border border-white/10 text-right break-all max-w-[210px]">
+                      {formatPoint(finalShot)}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-[11px] text-slate-500 font-medium">Global Angle <span className="font-mono text-[9px] text-slate-600 ml-1">atan2</span></span>
-                    <span className="text-xs font-mono text-cyan-100 font-bold bg-cyan-400/10 px-2 py-0.5 rounded border border-cyan-300/20">
-                      {getGlobalAngle(startShot, finalShot).toFixed(6)}&deg;
+                    <span className="text-xs font-mono text-cyan-100 font-bold bg-cyan-400/10 px-2 py-0.5 rounded border border-cyan-300/20 text-right break-all max-w-[210px]">
+                      {formatFixed(getGlobalAngle(startShot, finalShot))}&deg;
                     </span>
                   </div>
                 </div>
@@ -1980,8 +2034,8 @@ export default function App() {
                   <span className="font-mono text-slate-500"> endpoints {shotClearanceValidation.stats.endpoints}</span>.
                   <div className="mt-1 text-[10px] text-slate-500">
                     Vector: <span className="font-mono text-slate-300">first {shotSymbol}/A to final {shotSymbol}/A</span>
-                    <span className="font-mono text-slate-500"> | min gap {shotClearanceValidation.stats.lineMargin.toExponential(2)}</span>
-                    <span className="font-mono text-slate-500"> | max fan {shotClearanceValidation.stats.fanMaxCentralAngle.toFixed(4)}&deg;</span>
+                    <span className="font-mono text-slate-500"> | min gap {formatExponential(shotClearanceValidation.stats.lineMargin)}</span>
+                    <span className="font-mono text-slate-500"> | max fan {formatFixed(shotClearanceValidation.stats.fanMaxCentralAngle)}&deg;</span>
                     <span className="font-mono text-slate-500"> | epsilon hits {shotClearanceValidation.stats.epsilonBand}</span>
                     <span className="font-mono text-slate-500"> | {shotEditMode === SHOT_MODE_LOCKED ? 'Constrained' : 'Ghost'}</span>
                   </div>
@@ -1992,7 +2046,7 @@ export default function App() {
                       <div key={`${violation.triId}-${violation.symbol}-${idx}`} className="rounded-md border border-red-300/20 bg-[#0b1016]/80 px-2 py-1.5 text-[10px] text-red-100">
                         <span className="font-mono font-bold">{violation.triId}</span>
                         <span className="font-mono"> {violation.symbol}</span> expected {violation.expected}; dy =
-                        <span className="font-mono"> {violation.score.toExponential(2)}</span>
+                        <span className="font-mono"> {formatExponential(violation.score)}</span>
                       </div>
                     ))}
                   </div>
@@ -2039,10 +2093,10 @@ export default function App() {
                 <div className="text-xs font-mono bg-[#0b1016] p-2.5 rounded-md border border-white/10 relative overflow-hidden">
                   <div className="absolute left-0 top-0 bottom-0 w-1 bg-slate-300" />
                   <div className="font-bold mb-1.5 text-slate-200 ml-1">{baseTriangle.name}</div>
-                  <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-slate-500 ml-1">
-                    <div>A ({labelsMap[0]}): <span className="text-slate-200 font-medium">{baseTriangle.points[0].x.toFixed(4)}, {baseTriangle.points[0].y.toFixed(4)}</span></div>
-                    <div>B ({labelsMap[1]}): <span className="text-slate-200 font-medium">{baseTriangle.points[1].x.toFixed(4)}, {baseTriangle.points[1].y.toFixed(4)}</span></div>
-                    <div className="col-span-2">C ({labelsMap[2]}): <span className="text-slate-200 font-medium">{baseTriangle.points[2].x.toFixed(4)}, {baseTriangle.points[2].y.toFixed(4)}</span></div>
+                  <div className="grid grid-cols-1 gap-y-1 text-slate-500 ml-1 break-all">
+                    <div>A ({labelsMap[0]}): <span className="text-slate-200 font-medium">{formatPoint(baseTriangle.points[0])}</span></div>
+                    <div>B ({labelsMap[1]}): <span className="text-slate-200 font-medium">{formatPoint(baseTriangle.points[1])}</span></div>
+                    <div>C ({labelsMap[2]}): <span className="text-slate-200 font-medium">{formatPoint(baseTriangle.points[2])}</span></div>
                   </div>
                 </div>
 
@@ -2050,10 +2104,10 @@ export default function App() {
                   <div key={tri.id} className="text-[11px] font-mono bg-[#111821] p-2 rounded-md border border-white/10 shadow-sm relative overflow-hidden hover:bg-[#18222c] transition-colors">
                     <div className="absolute left-0 top-0 bottom-0 w-1" style={{ backgroundColor: tri.color }} />
                     <div className="font-bold mb-1 text-slate-300 ml-1.5">{tri.id}</div>
-                    <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-slate-500 ml-1.5">
-                      <div>A: <span className="text-slate-300">{tri.points[0].x.toFixed(4)}, {tri.points[0].y.toFixed(4)}</span></div>
-                      <div>B: <span className="text-slate-300">{tri.points[1].x.toFixed(4)}, {tri.points[1].y.toFixed(4)}</span></div>
-                      <div className="col-span-2">C: <span className="text-slate-300">{tri.points[2].x.toFixed(4)}, {tri.points[2].y.toFixed(4)}</span></div>
+                    <div className="grid grid-cols-1 gap-y-0.5 text-slate-500 ml-1.5 break-all">
+                      <div>A: <span className="text-slate-300">{formatPoint(tri.points[0])}</span></div>
+                      <div>B: <span className="text-slate-300">{formatPoint(tri.points[1])}</span></div>
+                      <div>C: <span className="text-slate-300">{formatPoint(tri.points[2])}</span></div>
                     </div>
                   </div>
                 ))}
@@ -2315,7 +2369,7 @@ export default function App() {
                                 className="font-mono tracking-tight" 
                                 style={{ textShadow: '0 0 5px #070b10, 0 0 5px #070b10, 0 0 8px #070b10' }}
                               >
-                                {vertexName}: ({p.x.toFixed(4)}, {p.y.toFixed(4)})
+                                {vertexName}: ({formatPoint(p)})
                               </text>
                             </g>
                           );

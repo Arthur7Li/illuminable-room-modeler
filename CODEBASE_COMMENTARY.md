@@ -70,6 +70,8 @@ the cross-file architecture map.
   colors the shot vector green for valid or red for invalid.
 - Searches a bounded local symbolic `x`/`y` angle region using progressively
   finer grid steps and the same all-vertex line validator as the live view.
+- Formats visible numeric readouts through one display-precision setting,
+  defaulting to 12 decimals and clamping at 15 useful browser-number decimals.
 - Displays first/final shot endpoint occurrences with formal colors while
   ignoring those endpoint coordinates as obstruction contributors.
 - Renders geometry in mathematical coordinates inside a flipped SVG group.
