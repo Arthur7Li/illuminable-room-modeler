@@ -64,6 +64,9 @@ const INVALID_SHOT_COLOR = '#ef4444';
 // The default clearance epsilon is a perpendicular-distance tolerance in math units.
 const DEFAULT_CLEARANCE_EPSILON = 1e-10;
 
+// Angle A/B number steppers default to one tenth of a degree.
+const DEFAULT_ANGLE_INCREMENT = 0.1;
+
 // Numeric readouts default to twelve decimal places for precise endpoint/angle inspection.
 const DEFAULT_DISPLAY_DECIMALS = 12;
 
@@ -1280,6 +1283,8 @@ export default function App() {
   const [baseInputMode, setBaseInputMode] = useState('angles'); 
   // Default angle data is chosen so physical A is the small angle in the prototype.
   const [angleParams, setAngleParams] = useState({ a: 15, b: 50, length: 10 }); 
+  // Angle increment controls the native number-stepper amount for Angle A and Angle B.
+  const [angleIncrementInput, setAngleIncrementInput] = useState(String(DEFAULT_ANGLE_INCREMENT));
   // Coordinate defaults create a right-ish triangle for immediate manual testing.
   const [baseCoordsInput, setBaseCoordsInput] = useState([
     { x: 0, y: 0 },
@@ -1393,6 +1398,13 @@ export default function App() {
     // Clamp to the useful range for IEEE-754 browser numbers.
     return Math.max(0, Math.min(integerPrecision, MAX_DISPLAY_DECIMALS));
   }, [displayPrecisionInput]);
+
+  const angleInputStep = useMemo(() => {
+    // Parse the editable step size used by the Angle A/B native number controls.
+    const parsed = Number(angleIncrementInput);
+    // Nonpositive or malformed step sizes fall back without mutating what the user typed.
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ANGLE_INCREMENT;
+  }, [angleIncrementInput]);
 
   const formatFixed = (value) => {
     // Non-finite geometry values should be visible instead of throwing in toFixed().
@@ -1838,16 +1850,28 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] font-bold text-slate-500 w-16 text-right mr-1">Angle A</span>
                   <div className="relative w-full">
-                    <input type="number" step="0.1" value={angleParams.a} onChange={e => handleAngleParamChange('a', e.target.value)} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all pr-6" />
+                    <input type="number" step={angleInputStep} value={angleParams.a} onChange={e => handleAngleParamChange('a', e.target.value)} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all pr-6" />
                     <span className="absolute right-2 top-1.5 text-slate-500 font-mono text-xs">&deg;</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] font-bold text-slate-500 w-16 text-right mr-1">Angle B</span>
                   <div className="relative w-full">
-                    <input type="number" step="0.1" value={angleParams.b} onChange={e => handleAngleParamChange('b', e.target.value)} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all pr-6" />
+                    <input type="number" step={angleInputStep} value={angleParams.b} onChange={e => handleAngleParamChange('b', e.target.value)} className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all pr-6" />
                     <span className="absolute right-2 top-1.5 text-slate-500 font-mono text-xs">&deg;</span>
                   </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-bold text-slate-500 w-16 text-right mr-1">Angle Step</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.0001"
+                    value={angleIncrementInput}
+                    onChange={e => setAngleIncrementInput(e.target.value)}
+                    title="Native number-stepper increment for Angle A and Angle B."
+                    className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all"
+                  />
                 </div>
                 {lockedShotNotice && (
                   <div className="text-[10px] text-amber-100 mt-1 pl-16 font-medium bg-amber-500/10 rounded py-1.5 px-2 border border-amber-300/20">

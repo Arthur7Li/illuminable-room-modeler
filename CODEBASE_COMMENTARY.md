@@ -39,6 +39,8 @@ the cross-file architecture map.
 - Contains the full workbench UI and geometry logic.
 - Uses React state for mode, triangle input, code input, ray input, pan/zoom, and
   label display state.
+- Stores an editable Angle A/B increment separately from the angle values; that
+  increment only affects the browser number stepper, not the math directly.
 - Uses `useMemo` for derived geometry that can grow with the number of reflected
   triangles.
 - Builds the base triangle either from coordinates or from two angles and a base
@@ -99,6 +101,8 @@ the cross-file architecture map.
 - `dev` starts Vite.
 - `build` produces the static `dist` folder.
 - `lint` runs ESLint over the project.
+- `test` runs the Node math regression suite.
+- `ci` runs tests, lint, and production build in the same order as CI.
 - `preview` serves the production build locally.
 - Runtime dependencies are React, React DOM, Tailwind, Tailwind's Vite plugin,
   and `lucide-react` icons.
@@ -126,6 +130,13 @@ the cross-file architecture map.
 ### `README.md`
 
 - Short project-facing entry point for setup commands and high-level purpose.
+
+### `.github/workflows/ci.yml`
+
+- Runs on pushes to every branch and on pull requests.
+- Installs with `npm ci`, then runs `npm test`, `npm run lint`, and
+  `npm run build`.
+- Keeps math regressions separate from the main-branch Pages deployment.
 
 ## Core Geometry Decisions
 

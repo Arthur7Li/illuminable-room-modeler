@@ -16,6 +16,7 @@ proof-grade exact arithmetic validator.
 - Dark interactive SVG viewer with pan, zoom, fit-to-screen, labels, and side
   annotations.
 - Triangle input by coordinates or by two angles plus base length.
+- Editable Angle A/B step size for fine or coarse number-stepper perturbations.
 - Ray simulator from a selected vertex and angle.
 - Code unfolder for whitespace-separated integer bounce-block counts.
 - Constrained mode that rejects angle edits before they invalidate the current code-mode shot.
@@ -49,6 +50,18 @@ Lint:
 
 ```bash
 npm run lint
+```
+
+Math regression tests:
+
+```bash
+npm test
+```
+
+Full local CI check:
+
+```bash
+npm run ci
 ```
 
 ## Project Notes

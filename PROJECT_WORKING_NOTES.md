@@ -970,6 +970,16 @@ Display precision:
 4. Internal stable-region cache keys keep their own rounding because that
    rounding is part of the search algorithm, not the visible display format.
 
+Angle increment:
+
+1. The `Angle Step` control changes the native stepper increment for Angle A and
+   Angle B.
+2. It defaults to `0.1` degrees.
+3. It does not directly change geometry; it only changes the next value produced
+   by the browser number input when the user increments or decrements an angle.
+4. Constrained mode still validates the candidate value before committing it,
+   regardless of the selected increment.
+
 Vertex color logic:
 
 - Original `A` and final reflected `A` still get green endpoint circles on the
@@ -1091,3 +1101,24 @@ triangle poolshots relevant to an invisible-point conjecture. It uses
 floating-point reflection geometry and a heuristic code-to-edge parser. It does
 not yet prove visibility, invisibility, or the conjectured classification.
 ```
+
+## Regression Testing
+
+The CI math suite lives in `tests/math-regression.test.mjs` and runs with
+Node's built-in test runner. It deliberately avoids the browser and React so it
+can focus on the floating-point geometry and algorithms:
+
+1. Reflection invariants.
+2. Angle-mode triangle construction.
+3. Default code parsing, symbolic mapping, side sequence, and reflection edges.
+4. Symbolic angle round-tripping.
+5. All-vertex blue/red line validation.
+6. Known valid and invalid angle perturbations.
+7. Fan central-angle rejection.
+8. Code-path consistency.
+9. Stable-region search around the known valid sample.
+10. `atan2` quadrant handling.
+
+The separate `.github/workflows/ci.yml` workflow runs on pushes to every branch.
+It performs `npm ci`, `npm test`, `npm run lint`, and `npm run build`. The Pages
+deployment workflow remains main-only.

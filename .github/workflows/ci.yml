@@ -1,0 +1,45 @@
+# Run non-deployment checks on every branch so math regressions are caught before main.
+name: Continuous Integration
+
+# Pushes to any branch and pull requests both run the same verification job.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# The checks only need to read repository contents.
+permissions:
+  contents: read
+
+# Cancel stale runs on the same branch when a newer commit is pushed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Verify math regressions first, then app health.
+jobs:
+  test:
+    # Ubuntu matches GitHub Pages' hosted runner environment closely enough for this app.
+    runs-on: ubuntu-latest
+    steps:
+      # Pull source files and lockfile into the runner.
+      - name: Checkout
+        uses: actions/checkout@v7
+      # Use the current Node LTS and npm cache for reproducible CI installs.
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+      # npm ci proves package.json and package-lock.json remain synchronized.
+      - name: Install dependencies
+        run: npm ci
+      # Run the math-heavy algorithmic regression suite.
+      - name: Run tests
+        run: npm test
+      # Lint catches accidental undefined names and hook/dependency mistakes.
+      - name: Lint
+        run: npm run lint
+      # Build is the UI-adjacent smoke test: React, Tailwind, Vite, and Pages base paths must compile.
+      - name: Build
+        run: npm run build
