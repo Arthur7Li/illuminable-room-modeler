@@ -85,6 +85,18 @@ const VALID_SHOT_COLOR = '#22c55e';
 // Invalid shots use red for the shot vector in ghost mode.
 const INVALID_SHOT_COLOR = '#ef4444';
 
+// The code-mode shot line is drawn as a fixed dashed red guide.
+const SHOT_LINE_COLOR = '#e03030';
+
+// Endpoint dots use a darker red to distinguish them from the line itself.
+const SHOT_ENDPOINT_FILL_COLOR = '#8b0000';
+
+// Vertices that fall below the guide line are rendered in black.
+const SHOT_VERTEX_BELOW_LINE_COLOR = '#000000';
+
+// Vertices above the guide line keep the cyan/blue accent used by the viewer.
+const SHOT_VERTEX_ABOVE_LINE_COLOR = '#1ec8f0';
+
 // The default clearance epsilon is a perpendicular-distance tolerance in math units.
 const DEFAULT_CLEARANCE_EPSILON = 1e-10;
 
@@ -1616,8 +1628,6 @@ export default function App() {
   const lineLength = shotGeometry.lineLength;
   // Preview mode ghosting activates only for an invalid code-mode shot.
   const isGhostedShot = simulatorMode === 'code' && shotEditMode === SHOT_MODE_PREVIEW && shotClearanceValidation.status === 'invalid';
-  // The shot vector turns green when valid and red when invalid.
-  const shotLineColor = shotClearanceValidation.status === 'valid' ? VALID_SHOT_COLOR : INVALID_SHOT_COLOR;
   // Lookup a rendered point's validation classification without recomputing the scan.
   const getClearancePointValidation = (triId, vertexIdx, symbol) => {
     // Clearance classification applies only to active code-mode shots.
@@ -1626,6 +1636,12 @@ export default function App() {
     const occurrenceKey = getClearanceOccurrenceKey(triId, vertexIdx, symbol);
     // Return the existing classification when this occurrence was part of the scan.
     return shotClearanceValidation.byOccurrence.get(occurrenceKey) || null;
+  };
+
+  const getShotVertexRenderColor = (validation, fallbackColor = SHOT_VERTEX_ABOVE_LINE_COLOR) => {
+    if (!validation) return fallbackColor;
+    if (validation.isShotEndpoint) return SHOT_ENDPOINT_FILL_COLOR;
+    return validation.score < 0 ? SHOT_VERTEX_BELOW_LINE_COLOR : fallbackColor;
   };
 
   const clearShotFeedback = () => {
@@ -2272,10 +2288,10 @@ export default function App() {
                   <line
                     x1={startShot.x} y1={startShot.y}
                     x2={finalShot.x} y2={finalShot.y}
-                    stroke={shotLineColor} strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round" opacity={isGhostedShot ? 0.78 : 1}
+                    stroke={SHOT_LINE_COLOR} strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round" opacity={isGhostedShot ? 0.78 : 1}
                   />
-                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill={VALID_SHOT_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
-                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill={VALID_SHOT_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
+                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill={SHOT_ENDPOINT_FILL_COLOR} stroke={SHOT_LINE_COLOR} strokeWidth={1.5 / zoom} />
+                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill={SHOT_ENDPOINT_FILL_COLOR} stroke={SHOT_LINE_COLOR} strokeWidth={1.5 / zoom} />
                 </g>
               )}
             </g>
@@ -2304,6 +2320,7 @@ export default function App() {
                     const cy = toSvgY(p.y);
                     const radius = validation.valid ? 4 : 6;
                     const showLabel = true;
+                    const markerColor = getShotVertexRenderColor(validation);
 
                     markers.push(
                       <g key={`clearance-mark-${key}`}>
@@ -2311,21 +2328,21 @@ export default function App() {
                           cx={cx}
                           cy={cy}
                           r={radius + 2}
-                          fill={validation.ring}
+                          fill={markerColor}
                           opacity={validation.valid ? 0.28 : 0.85}
                         />
                         <circle
                           cx={cx}
                           cy={cy}
                           r={radius}
-                          fill={validation.color}
+                          fill={markerColor}
                           opacity={validation.valid ? 0.82 : 1}
                         />
                         {showLabel && (
                           <text
                             x={cx}
                             y={cy + 0.5}
-                            fill={validation.valid ? '#07111f' : '#fff1f2'}
+                            fill={markerColor}
                             fontSize="8"
                             fontWeight="900"
                             textAnchor="middle"
@@ -2429,7 +2446,7 @@ export default function App() {
                             const clearancePointValidation = getClearancePointValidation(tri.id, i, symbol);
                             
                             if (clearancePointValidation) {
-                              vColor = clearancePointValidation.color;
+                              vColor = getShotVertexRenderColor(clearancePointValidation, isDerived ? tri.color : themePalette.baseTriangle);
                               vertexRadius = clearancePointValidation.valid ? vertexRadius : 6;
                             }
                           }
