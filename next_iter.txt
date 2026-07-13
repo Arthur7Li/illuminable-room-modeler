@@ -1,0 +1,11 @@
+blue / black each side for vertices (instead of blue / red).
+also make the first and last endpoint vertices red. keep this as the default setting. we may also omit the very last reflected triangle from being rendered.
+
+
+mono colour triangles mode, just white
+triangles where the fan vertices are black will have colour black, ones that have blue fans will use white triangles.
+
+this is a second butto beside dark/light mode button
+
+///////////////
+interchange x <-> z

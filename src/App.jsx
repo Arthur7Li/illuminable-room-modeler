@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle, Sun, Moon } from 'lucide-react';
+import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle, Sun, Moon, Palette } from 'lucide-react';
 
 // =============================================================================
 // App.jsx architecture note
@@ -14,7 +14,7 @@ import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity,
 // 2. measure and control the SVG viewport;
 // 3. derive the base triangle;
 // 4. derive ray-mode or code-mode reflected triangles;
-// 5. derive the shot vector and direct blue/red line validator;
+// 5. derive the shot vector and direct blue/black line validator;
 // 6. render the sidebar and SVG canvas.
 // When this grows further, the clean split points are: geometry helpers, code
 // parser/unfolder, shot-line validator, and presentation components.
@@ -38,7 +38,9 @@ const THEME_PALETTES = {
     labelHalo: '#f8fafc',
     midpointFill: '#f8fafc',
     midpointStroke: '#475569',
-    midpointText: '#0f172a'
+    midpointText: '#0f172a',
+    monoBlueTriangle: '#94a3b8',
+    monoBlackTriangle: '#475569'
   },
   dark: {
     baseTriangle: '#e2e8f0',
@@ -48,7 +50,9 @@ const THEME_PALETTES = {
     labelHalo: '#070b10',
     midpointFill: '#0b1016',
     midpointStroke: '#cbd5e1',
-    midpointText: '#e2e8f0'
+    midpointText: '#e2e8f0',
+    monoBlueTriangle: '#94a3b8',
+    monoBlackTriangle: '#475569'
   }
 };
 
@@ -64,16 +68,25 @@ const SHOT_MODE_LOCKED = 'locked';
 // The preview mode intentionally allows invalid shots so they can be inspected.
 const SHOT_MODE_PREVIEW = 'preview';
 
+// The normal triangle renderer keeps the existing cycling color palette.
+const TRIANGLE_RENDER_COLORED = 'colored';
+
+// Mono rendering uses the fan vertex's formal black/blue role.
+const TRIANGLE_RENDER_MONO = 'mono';
+
 // The paper's formal blue tower vertices render blue in the viewer.
 const TOWER_BLUE_COLOR = '#38bdf8';
 
-// The paper's formal black tower vertices render red so valid/invalid state can stay on the ray.
-const TOWER_BLACK_COLOR = '#ef4444';
+// The paper's formal black tower vertices render black in the viewer.
+const TOWER_BLACK_COLOR = '#000000';
+
+// Singular shot endpoints render red even though they are ignored by the obstruction test.
+const ENDPOINT_VERTEX_COLOR = '#ef4444';
 
 // Formal tower coloring uses stable role names instead of geometry-derived top/bottom names.
 const TOWER_BLUE_ROLE = 'blue';
 
-// The "black" role is rendered red in this UI to match the requested blue/red vertex contrast.
+// The formal black role is distinct from red endpoint/error states.
 const TOWER_BLACK_ROLE = 'black';
 
 // Uncolored vertices use yellow because the formal tower-color graph failed to classify them.
@@ -323,8 +336,11 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
     else angles.push(axes.find(a => a !== currAngle && a !== lastAngle));
   }
 
-  // Pair each numeric run with its derived symbolic angle for display and unfolding.
-  const parsedSequence = nums.map((n, i) => ({ count: n, angle: angles[i] }));
+  // The app-facing convention names the smallest/default physical angle x and the largest z.
+  const displaySymbol = (symbol) => symbol === 'x' ? 'z' : symbol === 'z' ? 'x' : symbol;
+
+  // Pair each numeric run with its relabeled symbolic angle for display and unfolding.
+  const parsedSequence = nums.map((n, i) => ({ count: n, angle: displaySymbol(angles[i]) }));
 
   // Track the largest run attached to each symbolic angle.
   const maxBouncesCode = { x: 0, y: 0, z: 0 };
@@ -381,9 +397,15 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
   let triCount = 0;
 
   // Expand every parsed block into repeated side reflections.
-  for (const step of parsedSequence) {
+  for (let stepIndex = 0; stepIndex < parsedSequence.length; stepIndex++) {
+    // Read this parsed count/symbol pair.
+    const step = parsedSequence[stepIndex];
+    // The fan vertex is the physical corner associated with this symbolic run.
+    const fanVertexIdx = angleToIdx[step.angle];
+    // The fan point is fixed throughout this count block, even as reflected triangles are emitted.
+    const fanPoint = currentTri[fanVertexIdx] ? { ...currentTri[fanVertexIdx] } : null;
     // Convert this symbolic angle to its two physical adjacent edges.
-    const edges = getEdgesForAngle(angleToIdx[step.angle]);
+    const edges = getEdgesForAngle(fanVertexIdx);
     // currentEdge will be chosen either by alternation or forwardness.
     let currentEdge;
 
@@ -437,6 +459,16 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
         id: `Code-T${triangles.length + 1}`,
         // The reflected points stay in physical A/B/C index order.
         points: nextTri,
+        // Mono triangle rendering reads this count block's fixed fan vertex.
+        fanVertexIdx,
+        // Keep the original fan point so mono mode does not depend on triangle occurrence ids.
+        fanPoint,
+        // The parsed block index groups triangles emitted by the same count.
+        fanRunIndex: stepIndex,
+        // The number in the code sequence that produced this fan.
+        fanRunCount: step.count,
+        // Keep the source symbol for inspection and future UI details.
+        fanSymbol: step.angle,
         // Colors cycle so long unfoldings remain visually separable.
         color: COLORS[(triangles.length) % COLORS.length]
       });
@@ -468,7 +500,7 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
 const getShotGeometry = (baseTriangle, activeTriangles, labelsMap) => {
   // Physical A is the current source/target vertex convention for the shot.
   const shotVertexIdx = 0;
-  // Read the symbolic name of physical A so the UI can say "z/A" when relevant.
+  // Read the symbolic name of physical A so the UI can say "x/A" when relevant.
   const shotSymbol = labelsMap[shotVertexIdx] || 'A';
   // Use the first physical A as the start of the shot line.
   const startShot = baseTriangle.points[shotVertexIdx] || baseTriangle.points[0];
@@ -638,11 +670,11 @@ const getOppositeTowerRole = (role) => {
   return null;
 };
 
-/** Returns the requested blue/red UI color for a formal tower role. */
+/** Returns the requested blue/black UI color for a formal tower role. */
 const getTowerRoleColor = (role) => {
   // Formal blue vertices render blue.
   if (role === TOWER_BLUE_ROLE) return TOWER_BLUE_COLOR;
-  // Formal black vertices render red in this workbench.
+  // Formal black vertices render black in this workbench.
   if (role === TOWER_BLACK_ROLE) return TOWER_BLACK_COLOR;
   // Uncolored vertices render yellow because the tower-color propagation failed.
   return BAND_VERTEX_COLOR;
@@ -827,7 +859,7 @@ const getShotLineYAtX = (point, shotGeometry) => {
   return shotGeometry.startShot.y + slope * (point.x - shotGeometry.startShot.x);
 };
 
-/** Validates the unfolded code tower by testing every formal blue/red vertex against the shot line. */
+/** Validates the unfolded code tower by testing every formal blue/black vertex against the shot line. */
 const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTriangles, labelsMap, reflectionEdges = [], parsedSequence = [], clearanceEpsilon, extraViolations = [] }) => {
   // The idle state keeps ray mode and empty code mode visually quiet.
   if (simulatorMode !== 'code' || activeTriangles.length === 0) {
@@ -900,7 +932,7 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
   let checked = 0;
   // Count formal blue vertices.
   let blue = 0;
-  // Count formal black vertices, rendered red.
+  // Count formal black vertices.
   let red = 0;
   // Count vertices that never received a formal tower color.
   let uncolored = 0;
@@ -964,6 +996,12 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
       const score = point.y - lineY;
       // Shot endpoints are singular endpoints, not interior vertex obstructions.
       const isShotEndpoint = isShotEndpointCoordinate(point, shotGeometry, endpointTolerance);
+      // Endpoint vertices render red; all others render their formal tower role.
+      const vertexColor = isShotEndpoint ? ENDPOINT_VERTEX_COLOR : getTowerRoleColor(roleRecord?.role);
+      // Black and red markers need light label text for legibility.
+      const markerTextColor = isShotEndpoint || roleRecord?.role === TOWER_BLACK_ROLE ? '#fff1f2' : '#07111f';
+      // Black markers get a light ring so they remain visible on the dark canvas.
+      const markerRing = isShotEndpoint ? '#7f1d1d' : roleRecord?.role === TOWER_BLACK_ROLE ? '#f8fafc' : '#0f172a';
       // Build the renderable classification for this occurrence.
       const classification = {
         // Stable occurrence key used by marker rendering.
@@ -989,11 +1027,13 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
         // Every occurrence starts valid so one failure path counts it exactly once.
         valid: true,
         // The default expectation is the direct color-vs-line predicate.
-        expected: 'blue above line and red below line',
+        expected: 'blue above line and black below line',
         // Vertex fill color follows formal role, not current side of the drawn line.
-        color: getTowerRoleColor(roleRecord?.role),
+        color: vertexColor,
+        // Marker label color is chosen against the marker fill color.
+        textColor: markerTextColor,
         // Valid vertices get a dark low-emphasis ring until a failure path updates them.
-        ring: '#0f172a'
+        ring: markerRing
       };
       // Store the classification by stable occurrence for marker rendering.
       byOccurrence.set(occurrenceKey, classification);
@@ -1021,23 +1061,23 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
           lineSideMargin = Math.min(lineSideMargin, score);
         }
       } else if (classification.role === TOWER_BLACK_ROLE) {
-        // Increment red-rendered formal black total.
+        // Increment formal black total.
         red++;
-        // Red vertices must sit strictly below the shot line at their x coordinate.
+        // Black vertices must sit strictly below the shot line at their x coordinate.
         if (score >= -lineTolerance) {
-          // Count near-line and wrong-side red vertices for diagnostics.
+          // Count near-line and wrong-side black vertices for diagnostics.
           epsilonBand++;
-          // Mark this red vertex as invalid.
-          addViolation(classification, 'red y < line y');
+          // Mark this black vertex as invalid.
+          addViolation(classification, 'black y < line y');
         } else {
-          // Store the tightest positive red clearance below the line.
+          // Store the tightest positive black clearance below the line.
           lineSideMargin = Math.min(lineSideMargin, -score);
         }
       } else {
         // Count missing formal colors separately from line-side failures.
         uncolored++;
         // Uncolored vertices are invalid because every tower vertex must be classified.
-        addViolation(classification, 'formal blue/red tower color');
+        addViolation(classification, 'formal blue/black tower color');
       }
     }
   }
@@ -1184,7 +1224,7 @@ const findStableRegion = ({ angleParams, labelsMap, billiardsCode, currentCodeDa
     const sameLabels = haveSameLabelMap(candidateCodeData.idxToAngle, labelsMap);
     // Require the side sequence to remain unchanged so the same code path is being tested.
     const sameSides = haveSameSideSequence(candidateCodeData.sideSequence, currentCodeData.sideSequence);
-    // Candidate validity uses the same direct blue/red line validator as the live view.
+    // Candidate validity uses the same direct blue/black line validator as the live view.
     const candidateValidation = buildPoolshotTowerValidation({ simulatorMode: 'code', baseTriangle: candidateTriangle, activeTriangles: candidateCodeData.triangles, labelsMap: candidateCodeData.idxToAngle, reflectionEdges: candidateCodeData.reflectionEdges, parsedSequence: candidateCodeData.parsedSequence, clearanceEpsilon });
     // The sample is valid only when mapping, unfolding, and the line test all agree.
     const valid = sameLabels && sameSides && candidateValidation.status === 'valid';
@@ -1309,6 +1349,10 @@ export default function App() {
   const isDarkTheme = theme === 'dark';
   // SVG presentation attributes need direct palette values.
   const themePalette = THEME_PALETTES[theme];
+  // Triangle display mode is independent from the light/dark theme.
+  const [triangleRenderMode, setTriangleRenderMode] = useState(TRIANGLE_RENDER_COLORED);
+  // Mono mode renders code triangles from the formal color of their fan vertex.
+  const isMonoTriangleMode = triangleRenderMode === TRIANGLE_RENDER_MONO;
   // Two modes share the same viewer: geometric ray tracing and code unfolding.
   const [simulatorMode, setSimulatorMode] = useState('code'); 
   // The base triangle can be entered as coordinates or as two angles plus length.
@@ -1600,7 +1644,7 @@ export default function App() {
   }, [simulatorMode, shotEditMode, shotPathReference, codeData]);
 
   const shotClearanceValidation = useMemo(() => {
-    // Use the shared direct blue/red line validator so live rendering, locked edits, and search agree.
+    // Use the shared direct blue/black line validator so live rendering, locked edits, and search agree.
     return buildPoolshotTowerValidation({ simulatorMode, baseTriangle, activeTriangles, labelsMap, reflectionEdges: codeData.reflectionEdges, parsedSequence: codeData.parsedSequence, clearanceEpsilon, extraViolations: livePathConsistency.violations });
   }, [simulatorMode, baseTriangle, activeTriangles, labelsMap, codeData.reflectionEdges, codeData.parsedSequence, clearanceEpsilon, livePathConsistency.violations]);
 
@@ -1626,6 +1670,58 @@ export default function App() {
     const occurrenceKey = getClearanceOccurrenceKey(triId, vertexIdx, symbol);
     // Return the existing classification when this occurrence was part of the scan.
     return shotClearanceValidation.byOccurrence.get(occurrenceKey) || null;
+  };
+
+  // Rendering omits the terminal reflected triangle while keeping it in validation.
+  const visibleActiveTriangles = simulatorMode === 'code' && activeTriangles.length > 1
+    ? activeTriangles.slice(0, -1)
+    : activeTriangles;
+
+  const getTriangleMonoFanPoint = (tri) => {
+    // Ray triangles and legacy data do not have code-block fan points.
+    if (simulatorMode !== 'code' || !tri.fanPoint) return null;
+    // The last emitted triangle of a run is the incoming/first triangle of the next fan.
+    const triangleIdx = activeTriangles.indexOf(tri);
+    const nextTri = triangleIdx >= 0 ? activeTriangles[triangleIdx + 1] : null;
+    // Hand that shared boundary triangle to the next fan for mono display.
+    if (nextTri && nextTri.fanRunIndex === tri.fanRunIndex + 1 && nextTri.fanPoint) return nextTri.fanPoint;
+    // Otherwise use the fan point for the count block that emitted this triangle.
+    return tri.fanPoint;
+  };
+
+  const getTriangleFanScore = (tri) => {
+    // Ray triangles and legacy data do not have code-block fan points.
+    const fanPoint = getTriangleMonoFanPoint(tri);
+    if (!fanPoint || lineLength < 1e-12) return null;
+    // Evaluate the stored fan point against the current endpoint-defined shot line.
+    const lineY = getShotLineYAtX(fanPoint, shotGeometry);
+    // Vertical or degenerate shots cannot classify fan side by y-at-x.
+    if (!Number.isFinite(lineY)) return null;
+    // Positive means the code-block fan vertex is above the shot line; negative means below.
+    return fanPoint.y - lineY;
+  };
+
+  const getTriangleRenderStyle = (tri) => {
+    // Default mode preserves the existing multi-color unfolding.
+    if (!isMonoTriangleMode || simulatorMode !== 'code') {
+      return {
+        color: tri.color,
+        strokeColor: tri.color,
+        fillOpacity: isGhostedShot ? 0.035 : 0.1,
+        strokeOpacity: isGhostedShot ? 0.35 : 1
+      };
+    }
+
+    // Mono mode renders below-line fan blocks black and above-line fan blocks white.
+    const fanScore = getTriangleFanScore(tri);
+    const isBlackFan = Number.isFinite(fanScore) && fanScore < 0;
+    const color = isBlackFan ? themePalette.monoBlackTriangle : themePalette.monoBlueTriangle;
+    return {
+      color,
+      strokeColor: color,
+      fillOpacity: isGhostedShot ? 0.72 : 0.94,
+      strokeOpacity: 1
+    };
   };
 
   const clearShotFeedback = () => {
@@ -1663,14 +1759,14 @@ export default function App() {
     const candidateCodeData = unfoldCodeData(billiardsCode, candidateTriangle, true);
     // Preserve the current finite code interpretation instead of accepting a fresh reinterpretation.
     const pathConsistency = buildCodePathConsistencyValidation({ candidateCodeData, reference: buildCodePathReference(codeData) });
-    // Validate the candidate against the direct blue/red line rule before render.
+    // Validate the candidate against the direct blue/black line rule before render.
     const candidateSelfValidation = buildPoolshotTowerValidation({ simulatorMode: 'code', baseTriangle: candidateTriangle, activeTriangles: candidateCodeData.triangles, labelsMap: candidateCodeData.idxToAngle, reflectionEdges: candidateCodeData.reflectionEdges, parsedSequence: candidateCodeData.parsedSequence, clearanceEpsilon, extraViolations: pathConsistency.violations });
     // Reject any candidate ray that is intrinsically invalid.
     if (candidateSelfValidation.status === 'invalid') {
       // Use the first self-validation violation to explain the rejection.
       const firstViolation = candidateSelfValidation.violations[0];
       // Build a concise human-readable rejection message.
-      const reason = firstViolation ? `${firstViolation.triId} ${firstViolation.vertexName || firstViolation.symbol} expected ${firstViolation.expected}` : 'candidate ray failed blue/red line test';
+      const reason = firstViolation ? `${firstViolation.triId} ${firstViolation.vertexName || firstViolation.symbol} expected ${firstViolation.expected}` : 'candidate ray failed blue/black line test';
       // Reject before the angle state can render the bad ray.
       return { allowed: false, reason };
     }
@@ -1816,17 +1912,30 @@ export default function App() {
               </h1>
               <p className="text-[11px] font-medium text-slate-500 uppercase tracking-widest">Invisible Point Workbench</p>
             </div>
-            <button
-              type="button"
-              onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')}
-              className="theme-toggle shrink-0"
-              aria-pressed={isDarkTheme}
-              aria-label={`Switch to ${isDarkTheme ? 'light' : 'dark'} mode`}
-              title={`Switch to ${isDarkTheme ? 'light' : 'dark'} mode`}
-            >
-              {isDarkTheme ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
-              <span>{isDarkTheme ? 'Light' : 'Dark'}</span>
-            </button>
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')}
+                className="theme-toggle"
+                aria-pressed={isDarkTheme}
+                aria-label={`Switch to ${isDarkTheme ? 'light' : 'dark'} mode`}
+                title={`Switch to ${isDarkTheme ? 'light' : 'dark'} mode`}
+              >
+                {isDarkTheme ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+                <span>{isDarkTheme ? 'Light' : 'Dark'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTriangleRenderMode(current => current === TRIANGLE_RENDER_MONO ? TRIANGLE_RENDER_COLORED : TRIANGLE_RENDER_MONO)}
+                className="theme-toggle"
+                aria-pressed={isMonoTriangleMode}
+                aria-label={`Switch to ${isMonoTriangleMode ? 'colored' : 'mono'} triangle rendering`}
+                title={`Switch to ${isMonoTriangleMode ? 'colored' : 'mono'} triangle rendering`}
+              >
+                <Palette className="w-3.5 h-3.5" />
+                <span>{isMonoTriangleMode ? 'Color' : 'Mono'}</span>
+              </button>
+            </div>
           </div>
           
           <div className="grid grid-cols-2 gap-1 rounded-lg border border-white/10 bg-[#070b10] p-1">
@@ -2106,7 +2215,7 @@ export default function App() {
                 <div className="text-[11px] text-slate-400 leading-relaxed">
                   Checked <span className="font-mono text-slate-200">{shotClearanceValidation.checked}</span> A/B/C occurrences:
                   <span className="font-mono text-sky-300"> blue {shotClearanceValidation.stats.blue}</span>,
-                  <span className="font-mono text-red-300"> red {shotClearanceValidation.stats.red}</span>,
+                  <span className="font-mono text-slate-300"> black {shotClearanceValidation.stats.red}</span>,
                   <span className="font-mono text-yellow-300"> uncolored {shotClearanceValidation.stats.uncolored}</span>,
                   <span className="font-mono text-slate-500"> endpoints {shotClearanceValidation.stats.endpoints}</span>.
                   <div className="mt-1 text-[10px] text-slate-500">
@@ -2179,7 +2288,7 @@ export default function App() {
 
                 {activeTriangles.slice(0, 50).map(tri => (
                   <div key={tri.id} className="text-[11px] font-mono bg-[#111821] p-2 rounded-md border border-white/10 shadow-sm relative overflow-hidden hover:bg-[#18222c] transition-colors">
-                    <div className="absolute left-0 top-0 bottom-0 w-1" style={{ backgroundColor: tri.color }} />
+                    <div className="absolute left-0 top-0 bottom-0 w-1" style={{ backgroundColor: getTriangleRenderStyle(tri).color }} />
                     <div className="font-bold mb-1 text-slate-300 ml-1.5">{tri.id}</div>
                     <div className="grid grid-cols-1 gap-y-0.5 text-slate-500 ml-1.5 break-all">
                       <div>A: <span className="text-slate-300">{formatPoint(tri.points[0])}</span></div>
@@ -2233,18 +2342,21 @@ export default function App() {
               </g>
 
               {/* Generated Reflections - Glassy geometry look */}
-              {activeTriangles.map(tri => (
-                <polygon
-                  key={tri.id}
-                  points={`${tri.points[0].x},${tri.points[0].y} ${tri.points[1].x},${tri.points[1].y} ${tri.points[2].x},${tri.points[2].y}`}
-                  fill={tri.color}
-                  fillOpacity={isGhostedShot ? 0.035 : 0.1}
-                  stroke={tri.color}
-                  strokeOpacity={isGhostedShot ? 0.35 : 1}
-                  strokeWidth={2.2 / zoom} 
-                  strokeLinejoin="round"
-                />
-              ))}
+              {visibleActiveTriangles.map(tri => {
+                const triangleStyle = getTriangleRenderStyle(tri);
+                return (
+                  <polygon
+                    key={tri.id}
+                    points={`${tri.points[0].x},${tri.points[0].y} ${tri.points[1].x},${tri.points[1].y} ${tri.points[2].x},${tri.points[2].y}`}
+                    fill={triangleStyle.color}
+                    fillOpacity={triangleStyle.fillOpacity}
+                    stroke={triangleStyle.strokeColor}
+                    strokeOpacity={triangleStyle.strokeOpacity}
+                    strokeWidth={2.2 / zoom} 
+                    strokeLinejoin="round"
+                  />
+                );
+              })}
 
               {/* Base Triangle - Prominent Anchor */}
               <polygon
@@ -2274,8 +2386,8 @@ export default function App() {
                     x2={finalShot.x} y2={finalShot.y}
                     stroke={shotLineColor} strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round" opacity={isGhostedShot ? 0.78 : 1}
                   />
-                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill={VALID_SHOT_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
-                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill={VALID_SHOT_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
+                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill={ENDPOINT_VERTEX_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
+                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill={ENDPOINT_VERTEX_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
                 </g>
               )}
             </g>
@@ -2325,7 +2437,7 @@ export default function App() {
                           <text
                             x={cx}
                             y={cy + 0.5}
-                            fill={validation.valid ? '#07111f' : '#fff1f2'}
+                            fill={validation.textColor || (validation.valid ? '#07111f' : '#fff1f2')}
                             fontSize="8"
                             fontWeight="900"
                             textAnchor="middle"
@@ -2409,6 +2521,8 @@ export default function App() {
                     }
 
                     if (triHovered) {
+                      const triDisplayColor = isDerived ? getTriangleRenderStyle(tri).color : themePalette.baseTriangle;
+
                       // 1. Vertex Coordinates Annotation
                       for (let i = 0; i < 3; i++) {
                         const p = tri.points[i];
@@ -2421,7 +2535,8 @@ export default function App() {
                           const vertexName = ['A', 'B', 'C'][i];
                           
                           // Dynamic vertex coloring logic based on the all-vertex tower validator.
-                          let vColor = isDerived ? tri.color : themePalette.baseTriangle;
+                          let vColor = triDisplayColor;
+                          let vTextColor = vColor;
                           let vertexRadius = isDerived ? 4 : 5;
 
                           if (simulatorMode === 'code' && activeTriangles.length > 0) {
@@ -2430,6 +2545,7 @@ export default function App() {
                             
                             if (clearancePointValidation) {
                               vColor = clearancePointValidation.color;
+                              vTextColor = clearancePointValidation.textColor || vColor;
                               vertexRadius = clearancePointValidation.valid ? vertexRadius : 6;
                             }
                           }
@@ -2440,7 +2556,7 @@ export default function App() {
                               <text 
                                 x={cx + 8} 
                                 y={cy - 6} 
-                                fill={vColor} 
+                                fill={vTextColor} 
                                 fontSize="11" 
                                 fontWeight="700"
                                 className="font-mono tracking-tight" 
@@ -2470,11 +2586,11 @@ export default function App() {
 
                           labelsToRender.push(
                             <g key={`elbl-${isDerived ? 'derived-' : ''}${tri.id}-${e}`}>
-                              <circle cx={cx} cy={cy} r={9} fill={themePalette.midpointFill} stroke={isDerived ? tri.color : themePalette.midpointStroke} strokeWidth={1.5} opacity={0.95} />
+                              <circle cx={cx} cy={cy} r={9} fill={themePalette.midpointFill} stroke={isDerived ? triDisplayColor : themePalette.midpointStroke} strokeWidth={1.5} opacity={0.95} />
                               <text
                                 x={cx}
                                 y={cy}
-                                fill={isDerived ? tri.color : themePalette.midpointText}
+                                fill={isDerived ? triDisplayColor : themePalette.midpointText}
                                 fontSize="10"
                                 fontWeight="800"
                                 textAnchor="middle"
