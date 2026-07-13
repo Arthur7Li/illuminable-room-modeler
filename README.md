@@ -1,5 +1,6 @@
-# Link to the Github Repository
-https://github.com/Arthur7Li/illuminable-room-modeler
+# Link to the Github Repository & the website
+Repo: https://github.com/Arthur7Li/illuminable-room-modeler
+Website: https://billiard-everything.github.io/illuminable-room-modeler/
 
 # Unfolder
 

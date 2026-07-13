@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle } from 'lucide-react';
+import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle, Sun, Moon } from 'lucide-react';
 
 // =============================================================================
 // App.jsx architecture note
@@ -27,6 +27,30 @@ const COLORS = [
   '#7c3aed', '#c026d3', '#e11d48', '#ea580c', '#65a30d',
   '#0891b2', '#2563eb', '#db2777', '#b45309', '#16a34a'
 ];
+
+// Theme-specific SVG colors cannot be handled by Tailwind class overrides.
+const THEME_PALETTES = {
+  light: {
+    baseTriangle: '#334155',
+    gridAxis: '#94a3b8',
+    gridLine: '#d9e2ee',
+    canvasLabel: '#1e293b',
+    labelHalo: '#f8fafc',
+    midpointFill: '#f8fafc',
+    midpointStroke: '#475569',
+    midpointText: '#0f172a'
+  },
+  dark: {
+    baseTriangle: '#e2e8f0',
+    gridAxis: '#334155',
+    gridLine: '#182231',
+    canvasLabel: '#cbd5e1',
+    labelHalo: '#070b10',
+    midpointFill: '#0b1016',
+    midpointStroke: '#cbd5e1',
+    midpointText: '#e2e8f0'
+  }
+};
 
 // Mapping triangle edges (0, 1, 2) to their standard Side numbers (1, 2, 3)
 // Edge 0 (V0-V1) is opposite V2(C) -> Side 3
@@ -1277,6 +1301,14 @@ const findStableRegion = ({ angleParams, labelsMap, billiardsCode, currentCodeDa
 
 export default function App() {
   // --- APP STATE VARIABLES ---
+  // Light mode is the default; a saved dark preference is honored after the user chooses it.
+  const [theme, setTheme] = useState(() => (
+    window.localStorage.getItem('unfolder-theme') === 'dark' ? 'dark' : 'light'
+  ));
+  // A boolean keeps toggle rendering readable.
+  const isDarkTheme = theme === 'dark';
+  // SVG presentation attributes need direct palette values.
+  const themePalette = THEME_PALETTES[theme];
   // Two modes share the same viewer: geometric ray tracing and code unfolding.
   const [simulatorMode, setSimulatorMode] = useState('code'); 
   // The base triangle can be entered as coordinates or as two angles plus length.
@@ -1334,6 +1366,12 @@ export default function App() {
   const lastMouse = useRef({ x: 0, y: 0 }); 
   // Screen-space mouse position drives hover labels.
   const [mousePos, setMousePos] = useState({ x: -1000, y: -1000 }); 
+
+  // Persist the user's explicit theme choice and expose it for browser color-scheme defaults.
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem('unfolder-theme', theme);
+  }, [theme]);
 
   // Mount/Resize observer
   useEffect(() => {
@@ -1427,8 +1465,8 @@ export default function App() {
   
   const baseTriangle = useMemo(() => {
     // Use the shared pure builder so live rendering and candidate validation match.
-    return buildBaseTriangle(baseInputMode, baseCoordsInput, angleParams); 
-  }, [baseCoordsInput, baseInputMode, angleParams]);
+    return { ...buildBaseTriangle(baseInputMode, baseCoordsInput, angleParams), color: themePalette.baseTriangle }; 
+  }, [baseCoordsInput, baseInputMode, angleParams, themePalette.baseTriangle]);
 
 
   const rayData = useMemo(() => {
@@ -1764,17 +1802,32 @@ export default function App() {
 
 
   return (
-    <div className="flex h-screen w-full min-w-0 bg-[#080b0f] text-slate-200 font-sans overflow-hidden">
+    <div data-theme={theme} className={`app-theme app-theme-${theme} flex h-screen w-full min-w-0 bg-[#080b0f] text-slate-200 font-sans overflow-hidden`}>
       
       {/* LEFT PANEL - CONTROLS & INSPECTOR */}
       <div className="w-[340px] 2xl:w-[360px] border-r border-white/10 flex flex-col bg-[#10151c] shadow-[12px_0_36px_rgba(0,0,0,0.32)] z-10 overflow-hidden shrink-0">
         
         {/* App Header & Tabs */}
         <div className="pt-8 pb-0 px-5 border-b border-white/10 bg-[#0c1117] shrink-0">
-          <h1 className="text-xl font-bold text-slate-100 tracking-tight flex items-center gap-2 mb-1">
-            <Activity className="w-5 h-5 text-cyan-300" /> Unfolding Viewer
-          </h1>
-          <p className="text-[11px] font-medium text-slate-500 uppercase tracking-widest mb-5">Invisible Point Workbench</p>
+          <div className="flex items-start justify-between gap-3 mb-5">
+            <div className="min-w-0">
+              <h1 className="text-xl font-bold text-slate-100 tracking-tight flex items-center gap-2 mb-1">
+                <Activity className="w-5 h-5 text-cyan-300" /> Unfolding Viewer
+              </h1>
+              <p className="text-[11px] font-medium text-slate-500 uppercase tracking-widest">Invisible Point Workbench</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')}
+              className="theme-toggle shrink-0"
+              aria-pressed={isDarkTheme}
+              aria-label={`Switch to ${isDarkTheme ? 'light' : 'dark'} mode`}
+              title={`Switch to ${isDarkTheme ? 'light' : 'dark'} mode`}
+            >
+              {isDarkTheme ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+              <span>{isDarkTheme ? 'Light' : 'Dark'}</span>
+            </button>
+          </div>
           
           <div className="grid grid-cols-2 gap-1 rounded-lg border border-white/10 bg-[#070b10] p-1">
             <button 
@@ -2175,8 +2228,8 @@ export default function App() {
               
               {/* Academic Graph Paper Grid */}
               <g opacity="1">
-                {grid.linesX.map(x => <line key={`gx-${x}`} x1={x} y1={grid.minMathY} x2={x} y2={grid.maxMathY} stroke={x === 0 ? "#334155" : "#182231"} strokeWidth={(x === 0 ? 2 : 1) / zoom} />)}
-                {grid.linesY.map(y => <line key={`gy-${y}`} x1={grid.minMathX} y1={y} x2={grid.maxMathX} y2={y} stroke={y === 0 ? "#334155" : "#182231"} strokeWidth={(y === 0 ? 2 : 1) / zoom} />)}
+                {grid.linesX.map(x => <line key={`gx-${x}`} x1={x} y1={grid.minMathY} x2={x} y2={grid.maxMathY} stroke={x === 0 ? themePalette.gridAxis : themePalette.gridLine} strokeWidth={(x === 0 ? 2 : 1) / zoom} />)}
+                {grid.linesY.map(y => <line key={`gy-${y}`} x1={grid.minMathX} y1={y} x2={grid.maxMathX} y2={y} stroke={y === 0 ? themePalette.gridAxis : themePalette.gridLine} strokeWidth={(y === 0 ? 2 : 1) / zoom} />)}
               </g>
 
               {/* Generated Reflections - Glassy geometry look */}
@@ -2317,14 +2370,14 @@ export default function App() {
                       key={`angle-lbl-${vertexIdx}`}
                       x={labelX} 
                       y={labelY} 
-                      fill="#cbd5e1" 
+                      fill={themePalette.canvasLabel} 
                       fontSize="14" 
                       fontWeight="700"
                       textAnchor="middle"
                       alignmentBaseline="middle"
                       className="font-mono" 
                       style={{ 
-                        textShadow: '0 0 5px #070b10, 0 0 5px #070b10, 0 0 8px #070b10',
+                        textShadow: `0 0 5px ${themePalette.labelHalo}, 0 0 5px ${themePalette.labelHalo}, 0 0 8px ${themePalette.labelHalo}`,
                         fontStyle: 'italic'
                       }}
                     >
@@ -2368,7 +2421,7 @@ export default function App() {
                           const vertexName = ['A', 'B', 'C'][i];
                           
                           // Dynamic vertex coloring logic based on the all-vertex tower validator.
-                          let vColor = isDerived ? tri.color : '#e2e8f0';
+                          let vColor = isDerived ? tri.color : themePalette.baseTriangle;
                           let vertexRadius = isDerived ? 4 : 5;
 
                           if (simulatorMode === 'code' && activeTriangles.length > 0) {
@@ -2391,7 +2444,7 @@ export default function App() {
                                 fontSize="11" 
                                 fontWeight="700"
                                 className="font-mono tracking-tight" 
-                                style={{ textShadow: '0 0 5px #070b10, 0 0 5px #070b10, 0 0 8px #070b10' }}
+                                style={{ textShadow: `0 0 5px ${themePalette.labelHalo}, 0 0 5px ${themePalette.labelHalo}, 0 0 8px ${themePalette.labelHalo}` }}
                               >
                                 {vertexName}: ({formatPoint(p)})
                               </text>
@@ -2417,11 +2470,11 @@ export default function App() {
 
                           labelsToRender.push(
                             <g key={`elbl-${isDerived ? 'derived-' : ''}${tri.id}-${e}`}>
-                              <circle cx={cx} cy={cy} r={9} fill="#0b1016" stroke={isDerived ? tri.color : "#cbd5e1"} strokeWidth={1.5} opacity={0.95} />
+                              <circle cx={cx} cy={cy} r={9} fill={themePalette.midpointFill} stroke={isDerived ? tri.color : themePalette.midpointStroke} strokeWidth={1.5} opacity={0.95} />
                               <text
                                 x={cx}
                                 y={cy}
-                                fill={isDerived ? tri.color : "#e2e8f0"}
+                                fill={isDerived ? tri.color : themePalette.midpointText}
                                 fontSize="10"
                                 fontWeight="800"
                                 textAnchor="middle"
@@ -2448,12 +2501,12 @@ export default function App() {
         </div>
       </div>
       
-      {/* Dark Theme Scrollbar Styling */}
+      {/* Theme-aware scrollbar styling */}
       <style>{`
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
       `}</style>
     </div>
   );

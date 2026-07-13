@@ -8,9 +8,11 @@
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
   /* Set readable default text for any element not styled by Tailwind classes. */
-  color: #d8e0ea;
-  /* Match the app's dark workbench background to prevent white page flashes. */
-  background: #080b0f;
+  color: #1e293b;
+  /* Light mode is the default workbench background. */
+  background: #f8fafc;
+  /* Match native controls to the default light theme. */
+  color-scheme: light;
   /* Disable synthetic bold/italic so geometry labels render consistently. */
   font-synthesis: none;
   /* Ask browsers to favor legibility for the dense inspector text. */
@@ -19,6 +21,13 @@
   -webkit-font-smoothing: antialiased;
   /* Smooth text on Firefox/macOS. */
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Honor the saved dark preference after React mounts. */
+:root[data-theme='dark'] {
+  color: #d8e0ea;
+  background: #080b0f;
+  color-scheme: dark;
 }
 
 /* Make width/height calculations include border and padding everywhere. */
@@ -57,4 +66,213 @@ textarea {
 /* Preserve button affordance even when Tailwind classes remove default styling. */
 button {
   cursor: pointer;
+}
+
+/* Shared theme tokens used by controls and the scrollbar style in App.jsx. */
+.app-theme {
+  --app-bg: #f8fafc;
+  --sidebar-bg: #f1f5f9;
+  --header-bg: #ffffff;
+  --inspector-bg: #eef3f8;
+  --panel-bg: #ffffff;
+  --control-bg: #f8fafc;
+  --control-hover-bg: #eef2f7;
+  --canvas-bg: #f8fafc;
+  --text-strong: #0f172a;
+  --text-primary: #1e293b;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+  --border-color: #d5dde8;
+  --panel-shadow: 0 8px 24px rgb(15 23 42 / 0.08);
+  --sidebar-shadow: 12px 0 28px rgb(15 23 42 / 0.08);
+  --toolbar-shadow: 0 8px 22px rgb(15 23 42 / 0.12);
+  --scrollbar-thumb: #cbd5e1;
+  --scrollbar-thumb-hover: #94a3b8;
+}
+
+.app-theme-dark {
+  --app-bg: #080b0f;
+  --control-bg: #0b1016;
+  --control-hover-bg: #172230;
+  --text-strong: #f1f5f9;
+  --text-primary: #e2e8f0;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --text-faint: #475569;
+  --border-color: rgb(255 255 255 / 0.1);
+  --scrollbar-thumb: #334155;
+  --scrollbar-thumb-hover: #64748b;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 0.375rem;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--control-bg);
+  color: var(--text-secondary);
+  padding: 0 0.625rem;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.theme-toggle:hover {
+  background: var(--control-hover-bg);
+  color: var(--text-primary);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: 2px;
+}
+
+.app-theme-light {
+  background-color: var(--app-bg);
+  color: var(--text-primary);
+}
+
+/* Light-mode overrides for the app's existing dark Tailwind utility classes. */
+.app-theme-light[class~="bg-[#080b0f]"],
+.app-theme-light [class~="bg-[#080b0f]"] {
+  background-color: var(--app-bg);
+}
+
+.app-theme-light [class~="bg-[#10151c]"] {
+  background-color: var(--sidebar-bg);
+}
+
+.app-theme-light [class~="bg-[#0c1117]"] {
+  background-color: var(--header-bg);
+}
+
+.app-theme-light [class~="bg-[#0f141a]"] {
+  background-color: var(--inspector-bg);
+}
+
+.app-theme-light [class~="bg-[#151c24]"] {
+  background-color: var(--panel-bg);
+}
+
+.app-theme-light [class~="bg-[#070b10]"] {
+  background-color: var(--canvas-bg);
+}
+
+.app-theme-light [class~="bg-[#0b1016]"],
+.app-theme-light [class~="bg-[#111821]"],
+.app-theme-light [class~="bg-[#17212b]"] {
+  background-color: var(--control-bg);
+}
+
+.app-theme-light [class~="bg-[#0b1016]/80"] {
+  background-color: rgb(255 255 255 / 0.86);
+}
+
+.app-theme-light [class~="bg-[#101820]/95"] {
+  background-color: rgb(255 255 255 / 0.95);
+}
+
+.app-theme-light [class~="focus:bg-[#101923]"]:focus,
+.app-theme-light [class~="hover:bg-[#18222c]"]:hover,
+.app-theme-light [class~="hover:bg-[#172230]"]:hover,
+.app-theme-light [class~="hover:bg-white/5"]:hover {
+  background-color: var(--control-hover-bg);
+}
+
+.app-theme-light [class~="border-white/10"] {
+  border-color: var(--border-color);
+}
+
+.app-theme-light [class~="hover:border-slate-500/50"]:hover {
+  border-color: #94a3b8;
+}
+
+.app-theme-light .text-slate-100,
+.app-theme-light .text-slate-200 {
+  color: var(--text-strong);
+}
+
+.app-theme-light .text-slate-300 {
+  color: var(--text-primary);
+}
+
+.app-theme-light .text-slate-400 {
+  color: var(--text-secondary);
+}
+
+.app-theme-light .text-slate-500 {
+  color: var(--text-muted);
+}
+
+.app-theme-light .text-slate-600 {
+  color: var(--text-faint);
+}
+
+.app-theme-light [class~="hover:text-slate-200"]:hover {
+  color: var(--text-primary);
+}
+
+.app-theme-light [class~="placeholder:text-slate-600"]::placeholder {
+  color: var(--text-faint);
+}
+
+.app-theme-light .text-cyan-100,
+.app-theme-light .text-cyan-200 {
+  color: #155e75;
+}
+
+.app-theme-light .text-cyan-300,
+.app-theme-light [class~="hover:text-cyan-200"]:hover {
+  color: #0891b2;
+}
+
+.app-theme-light .text-amber-100,
+.app-theme-light .text-amber-200 {
+  color: #92400e;
+}
+
+.app-theme-light .text-emerald-100,
+.app-theme-light .text-emerald-300 {
+  color: #047857;
+}
+
+.app-theme-light .text-red-100,
+.app-theme-light .text-red-200,
+.app-theme-light .text-red-300 {
+  color: #b91c1c;
+}
+
+.app-theme-light .text-sky-300 {
+  color: #0284c7;
+}
+
+.app-theme-light .text-yellow-300 {
+  color: #a16207;
+}
+
+.app-theme-light [class~="shadow-[12px_0_36px_rgba(0,0,0,0.32)]"] {
+  box-shadow: var(--sidebar-shadow);
+}
+
+.app-theme-light [class~="shadow-[0_8px_28px_rgba(0,0,0,0.28)]"],
+.app-theme-light [class~="shadow-[0_8px_28px_rgba(0,0,0,0.22)]"] {
+  box-shadow: var(--panel-shadow);
+}
+
+.app-theme-light [class~="shadow-[0_8px_24px_rgba(0,0,0,0.32)]"] {
+  box-shadow: var(--toolbar-shadow);
+}
+
+.app-theme-light input,
+.app-theme-light textarea {
+  color-scheme: light;
+}
+
+.app-theme-dark input,
+.app-theme-dark textarea {
+  color-scheme: dark;
 }
