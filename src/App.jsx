@@ -79,14 +79,11 @@ const TOWER_BLACK_ROLE = 'black';
 // Uncolored vertices use yellow because the formal tower-color graph failed to classify them.
 const BAND_VERTEX_COLOR = '#facc15';
 
-// Valid shots use green for the shot vector in ghost mode.
-const VALID_SHOT_COLOR = '#22c55e';
+// Valid ghost shots keep the same guide red used by the live shot line.
+const VALID_SHOT_COLOR = '#e03030';
 
-// Invalid shots use red for the shot vector in ghost mode.
-const INVALID_SHOT_COLOR = '#ef4444';
-
-// The code-mode shot line is drawn as a fixed dashed red guide.
-const SHOT_LINE_COLOR = '#e03030';
+// Invalid ghost shots use a lighter, more opaque red to make the mismatch obvious.
+const INVALID_SHOT_COLOR = '#ff6b6b';
 
 // Endpoint dots use a darker red to distinguish them from the line itself.
 const SHOT_ENDPOINT_FILL_COLOR = '#8b0000';
@@ -1628,6 +1625,8 @@ export default function App() {
   const lineLength = shotGeometry.lineLength;
   // Preview mode ghosting activates only for an invalid code-mode shot.
   const isGhostedShot = simulatorMode === 'code' && shotEditMode === SHOT_MODE_PREVIEW && shotClearanceValidation.status === 'invalid';
+  // Ghost-mode shots keep the base guide color when valid and switch to a lighter red when invalid.
+  const shotLineVisualColor = isGhostedShot && shotClearanceValidation.status === 'invalid' ? INVALID_SHOT_COLOR : VALID_SHOT_COLOR;
   // Lookup a rendered point's validation classification without recomputing the scan.
   const getClearancePointValidation = (triId, vertexIdx, symbol) => {
     // Clearance classification applies only to active code-mode shots.
@@ -2288,10 +2287,10 @@ export default function App() {
                   <line
                     x1={startShot.x} y1={startShot.y}
                     x2={finalShot.x} y2={finalShot.y}
-                    stroke={SHOT_LINE_COLOR} strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round" opacity={isGhostedShot ? 0.78 : 1}
+                    stroke={shotLineVisualColor} strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round" opacity={isGhostedShot ? 0.9 : 1}
                   />
-                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill={SHOT_ENDPOINT_FILL_COLOR} stroke={SHOT_LINE_COLOR} strokeWidth={1.5 / zoom} />
-                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill={SHOT_ENDPOINT_FILL_COLOR} stroke={SHOT_LINE_COLOR} strokeWidth={1.5 / zoom} />
+                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill={SHOT_ENDPOINT_FILL_COLOR} stroke={shotLineVisualColor} strokeWidth={1.5 / zoom} />
+                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill={SHOT_ENDPOINT_FILL_COLOR} stroke={shotLineVisualColor} strokeWidth={1.5 / zoom} />
                 </g>
               )}
             </g>
