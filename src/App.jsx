@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle, Sun, Moon, Palette } from 'lucide-react';
+import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle, Sun, Moon, Palette, ZoomIn, ZoomOut, Lock, Unlock } from 'lucide-react';
 
 // =============================================================================
 // App.jsx architecture note
@@ -1402,8 +1402,12 @@ export default function App() {
   // Pan stores the mathematical coordinate at the center of the canvas.
   const [pan, setPan] = useState({ x: 5, y: 4 }); 
   // Zoom stores pixels per mathematical unit.
-  const [zoom, setZoom] = useState(35); 
-  
+  const [zoom, setZoom] = useState(35);
+  // When locked, trackpad/mouse-wheel gestures no longer change zoom (avoids accidental large jumps).
+  const [isZoomLocked, setIsZoomLocked] = useState(false);
+  // User-entered multiplier applied when the manual zoom button is clicked.
+  const [zoomMagnification, setZoomMagnification] = useState('2');
+
   // Drag state controls panning and cursor feedback.
   const [isDragging, setIsDragging] = useState(false); 
   // The previous mouse point is a ref because it should not cause re-renders.
@@ -1447,6 +1451,8 @@ export default function App() {
     const handleWheel = (e) => {
       // Prevent the page from scrolling while the user zooms the canvas.
       e.preventDefault();
+      // Locked mode ignores trackpad/wheel gestures entirely to avoid accidental large zoom jumps.
+      if (isZoomLocked) return;
       // Constant multiplicative zoom feels natural over large coordinate ranges.
       const zoomFactor = 1.1;
       // Browser wheel deltas are positive for scroll down, which we treat as zoom out.
@@ -1458,7 +1464,7 @@ export default function App() {
     container.addEventListener('wheel', handleWheel, { passive: false });
     // Remove the exact listener when dependencies change or the app unmounts.
     return () => container.removeEventListener('wheel', handleWheel);
-  }, []);
+  }, [isZoomLocked]);
 
 
   // --- DYNAMIC GEOMETRY GENERATION ---
@@ -1706,7 +1712,7 @@ export default function App() {
     if (!isMonoTriangleMode || simulatorMode !== 'code') {
       return {
         color: tri.color,
-        strokeColor: tri.color,
+        strokeColor: '#000000',
         fillOpacity: isGhostedShot ? 0.035 : 0.1,
         strokeOpacity: isGhostedShot ? 0.35 : 1
       };
@@ -1718,7 +1724,7 @@ export default function App() {
     const color = isBlackFan ? themePalette.monoBlackTriangle : themePalette.monoBlueTriangle;
     return {
       color,
-      strokeColor: color,
+      strokeColor: '#000000',
       fillOpacity: isGhostedShot ? 0.72 : 0.94,
       strokeOpacity: 1
     };
@@ -1863,6 +1869,20 @@ export default function App() {
     setPan({ x: (minX + maxX) / 2, y: (minY + maxY) / 2 });
     // Choose the largest zoom that leaves about 50 px padding per side.
     setZoom(Math.min((svgSize.width - 100) / w, (svgSize.height - 100) / h));
+  };
+
+  // Manual zoom-in click applies the user-entered magnification, ignoring wheel/trackpad input entirely.
+  const handleManualZoomIn = () => {
+    const factor = parseFloat(zoomMagnification);
+    if (!Number.isFinite(factor) || factor <= 0) return;
+    setZoom(prev => Math.max(0.5, Math.min(prev * factor, 5000)));
+  };
+
+  // Manual zoom-out click divides by the same user-entered magnification.
+  const handleManualZoomOut = () => {
+    const factor = parseFloat(zoomMagnification);
+    if (!Number.isFinite(factor) || factor <= 0) return;
+    setZoom(prev => Math.max(0.5, Math.min(prev / factor, 5000)));
   };
 
   // --- RENDERING HELPERS ---
@@ -2315,6 +2335,36 @@ export default function App() {
                 GENERATED: <span className="text-cyan-200 ml-2">{activeTriangles.length}</span>
              </div>
            )}
+          <div className="bg-[#101820]/95 text-slate-300 px-3 py-2 text-[11px] rounded-md shadow-[0_8px_24px_rgba(0,0,0,0.32)] border border-white/10 font-mono font-bold flex items-center gap-2 backdrop-blur" title="Current magnification (pixels per unit).">
+            <span className="text-slate-500">ZOOM</span>
+            <span className="text-cyan-200">{zoom.toFixed(1)}x</span>
+          </div>
+          <input
+            type="number"
+            min="0.01"
+            step="0.1"
+            value={zoomMagnification}
+            onChange={(e) => setZoomMagnification(e.target.value)}
+            className="w-14 bg-[#101820]/95 hover:bg-[#172230] text-slate-200 px-2 py-2.5 rounded-md shadow-[0_8px_24px_rgba(0,0,0,0.32)] border border-white/10 backdrop-blur text-xs font-bold text-center"
+            title="Magnification multiplier applied by the Zoom button."
+          />
+          <button onClick={handleManualZoomIn} className="bg-[#101820]/95 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 px-3 py-2.5 rounded-md shadow-[0_8px_24px_rgba(0,0,0,0.32)] border border-white/10 transition-colors backdrop-blur flex items-center gap-2 text-xs font-bold" title="Zoom in by the magnification multiplier entered to the left.">
+            <ZoomIn className="w-4 h-4" />
+            Zoom In
+          </button>
+          <button onClick={handleManualZoomOut} className="bg-[#101820]/95 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 px-3 py-2.5 rounded-md shadow-[0_8px_24px_rgba(0,0,0,0.32)] border border-white/10 transition-colors backdrop-blur flex items-center gap-2 text-xs font-bold" title="Zoom out by the magnification multiplier entered to the left.">
+            <ZoomOut className="w-4 h-4" />
+            Zoom Out
+          </button>
+          <button
+            onClick={() => setIsZoomLocked(current => !current)}
+            className={`px-3 py-2.5 rounded-md shadow-[0_8px_24px_rgba(0,0,0,0.32)] border transition-colors backdrop-blur flex items-center gap-2 text-xs font-bold ${isZoomLocked ? 'bg-cyan-500/20 border-cyan-400/40 text-cyan-200' : 'bg-[#101820]/95 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 border-white/10'}`}
+            aria-pressed={isZoomLocked}
+            title={isZoomLocked ? 'Trackpad/mouse-wheel zoom is locked. Click to unlock.' : 'Lock trackpad/mouse-wheel zoom to prevent accidental zooming.'}
+          >
+            {isZoomLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+            Fix
+          </button>
           <button onClick={handleFitScreen} className="bg-[#101820]/95 hover:bg-[#172230] text-slate-300 hover:text-cyan-200 px-3 py-2.5 rounded-md shadow-[0_8px_24px_rgba(0,0,0,0.32)] border border-white/10 transition-colors backdrop-blur flex items-center gap-2 text-xs font-bold" title="Fit all generated triangles to the canvas.">
             <Maximize className="w-4 h-4" />
             Fit
@@ -2348,7 +2398,7 @@ export default function App() {
                   <polygon
                     key={tri.id}
                     points={`${tri.points[0].x},${tri.points[0].y} ${tri.points[1].x},${tri.points[1].y} ${tri.points[2].x},${tri.points[2].y}`}
-                    fill={triangleStyle.color}
+                    fill="#ffffff"
                     fillOpacity={triangleStyle.fillOpacity}
                     stroke={triangleStyle.strokeColor}
                     strokeOpacity={triangleStyle.strokeOpacity}
@@ -2361,9 +2411,9 @@ export default function App() {
               {/* Base Triangle - Prominent Anchor */}
               <polygon
                 points={`${baseTriangle.points[0].x},${baseTriangle.points[0].y} ${baseTriangle.points[1].x},${baseTriangle.points[1].y} ${baseTriangle.points[2].x},${baseTriangle.points[2].y}`}
-                fill={baseTriangle.color}
+                fill="#ffffff"
                 fillOpacity="0.08"
-                stroke={baseTriangle.color}
+                stroke="#000000"
                 strokeWidth={3 / zoom}
                 strokeLinejoin="round"
               />
