@@ -1666,6 +1666,17 @@ export default function App() {
   const isGhostedShot = simulatorMode === 'code' && shotEditMode === SHOT_MODE_PREVIEW && shotClearanceValidation.status === 'invalid';
   // Ghost-mode shots keep the base guide color when valid and switch to a lighter red when invalid.
   const shotLineVisualColor = isGhostedShot && shotClearanceValidation.status === 'invalid' ? INVALID_SHOT_COLOR : VALID_SHOT_COLOR;
+
+  // Rendering omits the terminal reflected triangle while keeping it available for validation.
+  const visibleActiveTriangles = simulatorMode === 'code' && activeTriangles.length > 1 ? activeTriangles.slice(0, -1) : activeTriangles;
+
+  const getTriangleRenderStyle = (tri) => ({
+    color: tri.color,
+    strokeColor: '#000000',
+    fillOpacity: isGhostedShot ? 0.035 : 0.1,
+    strokeOpacity: isGhostedShot ? 0.35 : 1
+  });
+
   // Lookup a rendered point's validation classification without recomputing the scan.
   const getClearancePointValidation = (triId, vertexIdx, symbol) => {
     // Clearance classification applies only to active code-mode shots.
