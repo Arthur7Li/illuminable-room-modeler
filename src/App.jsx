@@ -1,7 +1,7 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle, Sun, Moon, Palette, ZoomIn, ZoomOut, Lock, Unlock } from 'lucide-react';
+import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock } from 'lucide-react';
 
 // =============================================================================
 // App.jsx architecture note
@@ -38,9 +38,7 @@ const THEME_PALETTES = {
     labelHalo: '#f8fafc',
     midpointFill: '#f8fafc',
     midpointStroke: '#475569',
-    midpointText: '#0f172a',
-    monoBlueTriangle: '#94a3b8',
-    monoBlackTriangle: '#475569'
+    midpointText: '#0f172a'
   },
   dark: {
     baseTriangle: '#e2e8f0',
@@ -50,9 +48,7 @@ const THEME_PALETTES = {
     labelHalo: '#070b10',
     midpointFill: '#0b1016',
     midpointStroke: '#cbd5e1',
-    midpointText: '#e2e8f0',
-    monoBlueTriangle: '#94a3b8',
-    monoBlackTriangle: '#475569'
+    midpointText: '#e2e8f0'
   }
 };
 
@@ -68,11 +64,8 @@ const SHOT_MODE_LOCKED = 'locked';
 // The preview mode intentionally allows invalid shots so they can be inspected.
 const SHOT_MODE_PREVIEW = 'preview';
 
-// The normal triangle renderer keeps the existing cycling color palette.
-const TRIANGLE_RENDER_COLORED = 'colored';
-
-// Mono rendering uses the fan vertex's formal black/blue role.
-const TRIANGLE_RENDER_MONO = 'mono';
+// The triangle renderer uses the unfolding's cycling color palette.
+// The previous mono branch has been removed in favor of the single color-based view.
 
 // The paper's formal blue tower vertices render blue in the viewer.
 const TOWER_BLUE_COLOR = '#38bdf8';
@@ -92,11 +85,20 @@ const TOWER_BLACK_ROLE = 'black';
 // Uncolored vertices use yellow because the formal tower-color graph failed to classify them.
 const BAND_VERTEX_COLOR = '#facc15';
 
-// Valid shots use green for the shot vector in ghost mode.
-const VALID_SHOT_COLOR = '#22c55e';
+// Valid ghost shots keep the same guide red used by the live shot line.
+const VALID_SHOT_COLOR = '#e03030';
 
-// Invalid shots use red for the shot vector in ghost mode.
-const INVALID_SHOT_COLOR = '#ef4444';
+// Invalid ghost shots use a lighter, more opaque red to make the mismatch obvious.
+const INVALID_SHOT_COLOR = '#ff6b6b';
+
+// Endpoint dots use a darker red to distinguish them from the line itself.
+const SHOT_ENDPOINT_FILL_COLOR = '#8b0000';
+
+// Vertices that fall below the guide line are rendered in black.
+const SHOT_VERTEX_BELOW_LINE_COLOR = '#000000';
+
+// Vertices above the guide line keep the cyan/blue accent used by the viewer.
+const SHOT_VERTEX_ABOVE_LINE_COLOR = '#1ec8f0';
 
 // The default clearance epsilon is a perpendicular-distance tolerance in math units.
 const DEFAULT_CLEARANCE_EPSILON = 1e-10;
@@ -459,9 +461,9 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
         id: `Code-T${triangles.length + 1}`,
         // The reflected points stay in physical A/B/C index order.
         points: nextTri,
-        // Mono triangle rendering reads this count block's fixed fan vertex.
+        // Preserve the fan metadata used for code-mode inspection and debugging.
         fanVertexIdx,
-        // Keep the original fan point so mono mode does not depend on triangle occurrence ids.
+        // Keep the original fan point so the unfolded path can be inspected.
         fanPoint,
         // The parsed block index groups triangles emitted by the same count.
         fanRunIndex: stepIndex,
@@ -1349,10 +1351,6 @@ export default function App() {
   const isDarkTheme = theme === 'dark';
   // SVG presentation attributes need direct palette values.
   const themePalette = THEME_PALETTES[theme];
-  // Triangle display mode is independent from the light/dark theme.
-  const [triangleRenderMode, setTriangleRenderMode] = useState(TRIANGLE_RENDER_COLORED);
-  // Mono mode renders code triangles from the formal color of their fan vertex.
-  const isMonoTriangleMode = triangleRenderMode === TRIANGLE_RENDER_MONO;
   // Two modes share the same viewer: geometric ray tracing and code unfolding.
   const [simulatorMode, setSimulatorMode] = useState('code'); 
   // The base triangle can be entered as coordinates or as two angles plus length.
@@ -1666,8 +1664,19 @@ export default function App() {
   const lineLength = shotGeometry.lineLength;
   // Preview mode ghosting activates only for an invalid code-mode shot.
   const isGhostedShot = simulatorMode === 'code' && shotEditMode === SHOT_MODE_PREVIEW && shotClearanceValidation.status === 'invalid';
-  // The shot vector turns green when valid and red when invalid.
-  const shotLineColor = shotClearanceValidation.status === 'valid' ? VALID_SHOT_COLOR : INVALID_SHOT_COLOR;
+  // Ghost-mode shots keep the base guide color when valid and switch to a lighter red when invalid.
+  const shotLineVisualColor = isGhostedShot && shotClearanceValidation.status === 'invalid' ? INVALID_SHOT_COLOR : VALID_SHOT_COLOR;
+
+  // Rendering omits the terminal reflected triangle while keeping it available for validation.
+  const visibleActiveTriangles = simulatorMode === 'code' && activeTriangles.length > 1 ? activeTriangles.slice(0, -1) : activeTriangles;
+
+  const getTriangleRenderStyle = (tri) => ({
+    color: tri.color,
+    strokeColor: '#000000',
+    fillOpacity: isGhostedShot ? 0.035 : 0.1,
+    strokeOpacity: isGhostedShot ? 0.35 : 1
+  });
+
   // Lookup a rendered point's validation classification without recomputing the scan.
   const getClearancePointValidation = (triId, vertexIdx, symbol) => {
     // Clearance classification applies only to active code-mode shots.
@@ -1678,56 +1687,10 @@ export default function App() {
     return shotClearanceValidation.byOccurrence.get(occurrenceKey) || null;
   };
 
-  // Rendering omits the terminal reflected triangle while keeping it in validation.
-  const visibleActiveTriangles = simulatorMode === 'code' && activeTriangles.length > 1
-    ? activeTriangles.slice(0, -1)
-    : activeTriangles;
-
-  const getTriangleMonoFanPoint = (tri) => {
-    // Ray triangles and legacy data do not have code-block fan points.
-    if (simulatorMode !== 'code' || !tri.fanPoint) return null;
-    // The last emitted triangle of a run is the incoming/first triangle of the next fan.
-    const triangleIdx = activeTriangles.indexOf(tri);
-    const nextTri = triangleIdx >= 0 ? activeTriangles[triangleIdx + 1] : null;
-    // Hand that shared boundary triangle to the next fan for mono display.
-    if (nextTri && nextTri.fanRunIndex === tri.fanRunIndex + 1 && nextTri.fanPoint) return nextTri.fanPoint;
-    // Otherwise use the fan point for the count block that emitted this triangle.
-    return tri.fanPoint;
-  };
-
-  const getTriangleFanScore = (tri) => {
-    // Ray triangles and legacy data do not have code-block fan points.
-    const fanPoint = getTriangleMonoFanPoint(tri);
-    if (!fanPoint || lineLength < 1e-12) return null;
-    // Evaluate the stored fan point against the current endpoint-defined shot line.
-    const lineY = getShotLineYAtX(fanPoint, shotGeometry);
-    // Vertical or degenerate shots cannot classify fan side by y-at-x.
-    if (!Number.isFinite(lineY)) return null;
-    // Positive means the code-block fan vertex is above the shot line; negative means below.
-    return fanPoint.y - lineY;
-  };
-
-  const getTriangleRenderStyle = (tri) => {
-    // Default mode preserves the existing multi-color unfolding.
-    if (!isMonoTriangleMode || simulatorMode !== 'code') {
-      return {
-        color: tri.color,
-        strokeColor: '#000000',
-        fillOpacity: isGhostedShot ? 0.035 : 0.1,
-        strokeOpacity: isGhostedShot ? 0.35 : 1
-      };
-    }
-
-    // Mono mode renders below-line fan blocks black and above-line fan blocks white.
-    const fanScore = getTriangleFanScore(tri);
-    const isBlackFan = Number.isFinite(fanScore) && fanScore < 0;
-    const color = isBlackFan ? themePalette.monoBlackTriangle : themePalette.monoBlueTriangle;
-    return {
-      color,
-      strokeColor: '#000000',
-      fillOpacity: isGhostedShot ? 0.72 : 0.94,
-      strokeOpacity: 1
-    };
+  const getShotVertexRenderColor = (validation, fallbackColor = SHOT_VERTEX_ABOVE_LINE_COLOR) => {
+    if (!validation) return fallbackColor;
+    if (validation.isShotEndpoint) return SHOT_ENDPOINT_FILL_COLOR;
+    return validation.score < 0 ? SHOT_VERTEX_BELOW_LINE_COLOR : fallbackColor;
   };
 
   const clearShotFeedback = () => {
@@ -1943,17 +1906,6 @@ export default function App() {
               >
                 {isDarkTheme ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
                 <span>{isDarkTheme ? 'Light' : 'Dark'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setTriangleRenderMode(current => current === TRIANGLE_RENDER_MONO ? TRIANGLE_RENDER_COLORED : TRIANGLE_RENDER_MONO)}
-                className="theme-toggle"
-                aria-pressed={isMonoTriangleMode}
-                aria-label={`Switch to ${isMonoTriangleMode ? 'colored' : 'mono'} triangle rendering`}
-                title={`Switch to ${isMonoTriangleMode ? 'colored' : 'mono'} triangle rendering`}
-              >
-                <Palette className="w-3.5 h-3.5" />
-                <span>{isMonoTriangleMode ? 'Color' : 'Mono'}</span>
               </button>
             </div>
           </div>
@@ -2434,10 +2386,10 @@ export default function App() {
                   <line
                     x1={startShot.x} y1={startShot.y}
                     x2={finalShot.x} y2={finalShot.y}
-                    stroke={shotLineColor} strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round" opacity={isGhostedShot ? 0.78 : 1}
+                    stroke={shotLineVisualColor} strokeWidth={2.5 / zoom} strokeDasharray={`${8 / zoom},${8 / zoom}`} strokeLinecap="round" opacity={isGhostedShot ? 0.9 : 1}
                   />
-                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill={ENDPOINT_VERTEX_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
-                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill={ENDPOINT_VERTEX_COLOR} stroke={shotLineColor} strokeWidth={1.5 / zoom} />
+                  <circle cx={startShot.x} cy={startShot.y} r={5 / zoom} fill={SHOT_ENDPOINT_FILL_COLOR} stroke={shotLineVisualColor} strokeWidth={1.5 / zoom} />
+                  <circle cx={finalShot.x} cy={finalShot.y} r={5 / zoom} fill={SHOT_ENDPOINT_FILL_COLOR} stroke={shotLineVisualColor} strokeWidth={1.5 / zoom} />
                 </g>
               )}
             </g>
@@ -2466,6 +2418,7 @@ export default function App() {
                     const cy = toSvgY(p.y);
                     const radius = validation.valid ? 4 : 6;
                     const showLabel = true;
+                    const markerColor = getShotVertexRenderColor(validation);
 
                     markers.push(
                       <g key={`clearance-mark-${key}`}>
@@ -2473,21 +2426,21 @@ export default function App() {
                           cx={cx}
                           cy={cy}
                           r={radius + 2}
-                          fill={validation.ring}
+                          fill={markerColor}
                           opacity={validation.valid ? 0.28 : 0.85}
                         />
                         <circle
                           cx={cx}
                           cy={cy}
                           r={radius}
-                          fill={validation.color}
+                          fill={markerColor}
                           opacity={validation.valid ? 0.82 : 1}
                         />
                         {showLabel && (
                           <text
                             x={cx}
                             y={cy + 0.5}
-                            fill={validation.textColor || (validation.valid ? '#07111f' : '#fff1f2')}
+                            fill={markerColor}
                             fontSize="8"
                             fontWeight="900"
                             textAnchor="middle"
@@ -2594,8 +2547,7 @@ export default function App() {
                             const clearancePointValidation = getClearancePointValidation(tri.id, i, symbol);
                             
                             if (clearancePointValidation) {
-                              vColor = clearancePointValidation.color;
-                              vTextColor = clearancePointValidation.textColor || vColor;
+                              vColor = getShotVertexRenderColor(clearancePointValidation, isDerived ? tri.color : themePalette.baseTriangle);
                               vertexRadius = clearancePointValidation.valid ? vertexRadius : 6;
                             }
                           }
