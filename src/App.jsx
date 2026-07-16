@@ -1,7 +1,10 @@
 // React supplies state, refs, effects, and memoization for this client-only tool.
 import { useState, useRef, useEffect, useMemo } from 'react';
 // Lucide supplies recognizable control/status icons without custom SVG code.
-import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock } from 'lucide-react';
+import { Maximize, Zap, Settings2, List, Code2, Compass, ChevronRight, Activity, CheckCircle2, XCircle, ShieldCheck, Eye, Search, AlertTriangle, Sun, Moon, ZoomIn, ZoomOut, Lock, Unlock, ScatterChart } from 'lucide-react';
+// The angle-region plot pop-up lives in its own module (see src/anglePlot) so
+// it can be unit-tested without React and does not bloat this file further.
+import AnglePlotWindow from './anglePlot/AnglePlotWindow.jsx';
 
 // =============================================================================
 // App.jsx architecture note
@@ -1391,6 +1394,11 @@ export default function App() {
   const [showAllLabels, setShowAllLabels] = useState(false);
   // Display decimals are editable text so the field can be cleared/retyped without fighting React.
   const [displayPrecisionInput, setDisplayPrecisionInput] = useState(String(DEFAULT_DISPLAY_DECIMALS));
+  // Controls whether the "Valid Angle A-B Region" pop-up is mounted.
+  const [isAnglePlotOpen, setIsAnglePlotOpen] = useState(false);
+  // Bumped on every "Plot Valid Angle Region" click so an already-open window
+  // regenerates and comes to the front instead of a duplicate window opening.
+  const [anglePlotRequestId, setAnglePlotRequestId] = useState(0);
 
   // --- VIEWPORT & INTERACTION STATE ---
   // Ref to the canvas container lets us measure available SVG pixels.
@@ -1761,6 +1769,15 @@ export default function App() {
     setAngleParams(candidateParams);
   };
 
+  const handleOpenAnglePlot = () => {
+    // Mounting is idempotent (isAnglePlotOpen is already true after the first
+    // click), so this can never create a second window; bumping the request
+    // id is what makes a second click on an already-open window refresh and
+    // surface it instead of doing nothing.
+    setIsAnglePlotOpen(true);
+    setAnglePlotRequestId(id => id + 1);
+  };
+
   const handleStableRegionSearch = () => {
     // Store a running state immediately so the button gives feedback during computation.
     setStableRegionResult({ status: 'running', message: 'Searching local x/y region...' });
@@ -2015,6 +2032,15 @@ export default function App() {
                 {(Number(angleParams.a) + Number(angleParams.b) >= 180) && (
                   <div className="text-[10px] text-red-200 mt-1 pl-16 text-center font-medium bg-red-500/10 rounded py-1 border border-red-400/20">Angles must sum &lt; 180&deg;</div>
                 )}
+                <button
+                  type="button"
+                  onClick={handleOpenAnglePlot}
+                  title="Generate and open the valid A/B angle-pair scatter plot."
+                  className="w-full flex items-center justify-center gap-1.5 bg-[#101820]/95 hover:bg-[#172230] text-slate-200 hover:text-cyan-200 px-2.5 py-1.5 rounded-md text-[11px] font-bold transition-colors"
+                >
+                  <ScatterChart className="w-3.5 h-3.5" />
+                  Plot Valid Angle Region
+                </button>
               </div>
             )}
 
@@ -2618,7 +2644,24 @@ export default function App() {
           </svg>
         </div>
       </div>
-      
+
+      {/* Valid Angle A-B Region pop-up. A single boolean controls mounting,
+          so re-clicking "Plot Valid Angle Region" can never spawn a second
+          window; it just bumps anglePlotRequestId to refresh the one that
+          exists. `validateLockedAngleCandidate` is passed through unchanged
+          so the plot's generator calls the exact same constraint check the
+          Angle A/B inputs above already use. */}
+      {isAnglePlotOpen && (
+        <AnglePlotWindow
+          angleParams={angleParams}
+          baseLength={Number(angleParams.length) || 0}
+          validateCandidate={validateLockedAngleCandidate}
+          refreshToken={anglePlotRequestId}
+          onClose={() => setIsAnglePlotOpen(false)}
+          theme={theme}
+        />
+      )}
+
       {/* Theme-aware scrollbar styling */}
       <style>{`
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
