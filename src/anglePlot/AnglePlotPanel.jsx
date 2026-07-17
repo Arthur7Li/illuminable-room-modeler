@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
 import { formatAngleDegrees } from './AnglePair.js';
 
 // AnglePlotPanel: draws the scatter of valid (A, B) points and owns all
 // zoom/pan/hover interaction for the graph. Implemented with a plain
 // <canvas> instead of SVG because the region can contain on the order of
-// 10^5 points (the full permitted A/B grid at 0.1 degree spacing) —
-// rendering that many individual SVG DOM nodes would be far slower than
-// letting the canvas rasterize them directly. No charting library exists
-// in this project (checked package.json before writing this), so this is
-// the "lightweight custom panel" option rather than adding a dependency.
+// 10^5 points (the full permitted A/B grid at a fine step) — rendering
+// that many individual SVG DOM nodes would be far slower than letting the
+// canvas rasterize them directly. No charting library exists in this
+// project (checked package.json before writing this), so this is the
+// "lightweight custom panel" option rather than adding a dependency.
 
 // Zoom/pan model mirrors the main triangle canvas in App.jsx: `zoom` is
 // screen pixels per degree (the same value is used for both axes so the
@@ -21,6 +21,16 @@ const POINT_HIT_RADIUS_PX = 7;
 // Above this many points, draw 1px dots instead of full circles — much
 // cheaper per point and still reads as a filled region at that density.
 const DENSE_POINT_THRESHOLD = 20000;
+// Shared by every plotted dot (valid points and the current-A/B highlight)
+// so the orange point is exactly the same size as the blue ones — only its
+// fill color differs.
+const POINT_RADIUS_PX = 2.4;
+
+// The view "Reset View" restores — a fixed overview of the whole permitted
+// triangle, independent of whatever is currently plotted. Also used as the
+// very first view before any generation has completed.
+const DEFAULT_ZOOM = 6;
+const DEFAULT_PAN = { a: 45, b: 45 };
 
 // Mirrors the light/dark values the main triangle canvas already uses
 // (THEME_PALETTES in App.jsx) so the two canvases stay visually consistent
@@ -41,7 +51,7 @@ const niceGridStepDegrees = (zoom) => {
 
 const computeFitView = (points, currentPoint, width, height) => {
   const all = currentPoint ? [...points, currentPoint] : points;
-  if (all.length === 0) return { zoom: 6, pan: { a: 45, b: 45 } };
+  if (all.length === 0) return { zoom: DEFAULT_ZOOM, pan: DEFAULT_PAN };
   let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
   all.forEach((p) => {
     if (p.a < minA) minA = p.a;
@@ -60,13 +70,17 @@ const computeFitView = (points, currentPoint, width, height) => {
   return { zoom, pan: { a: (minA + maxA) / 2, b: (minB + maxB) / 2 } };
 };
 
-export default function AnglePlotPanel({ points, currentPoint, resetToken, theme }) {
+// forwardRef exposes imperative view controls (zoomIn/zoomOut/fitToPoints/
+// resetToDefaultView) to AnglePlotWindow's toolbar buttons, since "multiply
+// whatever the current zoom happens to be" can't be expressed as a plain
+// prop the way a one-shot "reset to X" signal can.
+const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint, theme, isLocked, displayScale }, ref) {
   const palette = CANVAS_PALETTES[theme] || CANVAS_PALETTES.dark;
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const [size, setSize] = useState({ width: 600, height: 420 });
-  const [zoom, setZoom] = useState(6);
-  const [pan, setPan] = useState({ a: 45, b: 45 });
+  const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const [pan, setPan] = useState(DEFAULT_PAN);
   const [isDragging, setIsDragging] = useState(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const [hoverPoint, setHoverPoint] = useState(null);
@@ -87,16 +101,19 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
     return () => observer.disconnect();
   }, []);
 
-  // "Reset View" (and the initial mount) fits the viewport to every
-  // generated point plus the currently selected A/B pair. This adjusts
-  // state during render (React's documented pattern for "reset state when
-  // a value changes") rather than in a useEffect, because the reset must
-  // happen before the first paint at this size and must not cascade
-  // through an extra render-then-effect-then-render cycle.
-  const fitSignature = `${resetToken}:${size.width}:${size.height}`;
-  const [appliedFitSignature, setAppliedFitSignature] = useState(null);
-  if (fitSignature !== appliedFitSignature) {
-    setAppliedFitSignature(fitSignature);
+  // Fit the viewport to every generated point plus the currently selected
+  // A/B pair on mount, and again any time the panel's real measured size
+  // changes (the initial size is a placeholder until ResizeObserver reports
+  // the actual box). This adjusts state during render (React's documented
+  // pattern for "reset state when a value changes") rather than in a
+  // useEffect, because the reset must happen before the first paint at
+  // this size and must not cascade through an extra render cycle. Explicit
+  // re-fits after that go through the fitToPoints() imperative method below
+  // (the "Fit" button), which does not touch this signature.
+  const sizeSignature = `${size.width}x${size.height}`;
+  const [appliedSizeSignature, setAppliedSizeSignature] = useState(null);
+  if (sizeSignature !== appliedSizeSignature) {
+    setAppliedSizeSignature(sizeSignature);
     const fit = computeFitView(points, currentPoint, size.width, size.height);
     setZoom(fit.zoom);
     setPan(fit.pan);
@@ -106,6 +123,38 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
   const toScreenY = useCallback((b) => size.height / 2 - (b - pan.b) * zoom, [size.height, pan.b, zoom]);
   const toDataA = useCallback((x) => pan.a + (x - size.width / 2) / zoom, [size.width, pan.a, zoom]);
   const toDataB = useCallback((y) => pan.b - (y - size.height / 2) / zoom, [size.height, pan.b, zoom]);
+
+  const clampZoom = (value) => Math.max(MIN_ZOOM, Math.min(value, MAX_ZOOM));
+
+  // Imperative view controls used by AnglePlotWindow's Zoom In / Zoom Out /
+  // Fit / Reset View buttons. Locking the view (the "Fix" button) disables
+  // all four here too, as a second line of defense beyond the toolbar
+  // buttons themselves being disabled while locked.
+  useImperativeHandle(ref, () => ({
+    zoomIn: () => { if (!isLocked) setZoom((z) => clampZoom(z * WHEEL_ZOOM_FACTOR)); },
+    zoomOut: () => { if (!isLocked) setZoom((z) => clampZoom(z / WHEEL_ZOOM_FACTOR)); },
+    fitToPoints: () => {
+      if (isLocked) return;
+      const fit = computeFitView(points, currentPoint, size.width, size.height);
+      setZoom(fit.zoom);
+      setPan(fit.pan);
+    },
+    resetToDefaultView: () => {
+      if (isLocked) return;
+      setZoom(DEFAULT_ZOOM);
+      setPan(DEFAULT_PAN);
+    },
+    // The data-space rectangle currently visible in the canvas, used by
+    // AnglePlotWindow's "scope to current view" sweep option so a fine step
+    // only has to cover what's actually on screen instead of the full
+    // 0-90 domain.
+    getViewBounds: () => ({
+      minA: toDataA(0),
+      maxA: toDataA(size.width),
+      minB: toDataB(size.height),
+      maxB: toDataB(0),
+    }),
+  }), [isLocked, points, currentPoint, size, toDataA, toDataB]);
 
   // Redraw whenever the data, viewport, or hover/pin state changes.
   useEffect(() => {
@@ -124,7 +173,7 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
     ctx.fillStyle = palette.background;
     ctx.fillRect(0, 0, size.width, size.height);
 
-    // Grid lines + tick labels, one decimal place per the spec.
+    // Grid lines + tick labels, precise enough to represent the current step.
     const step = niceGridStepDegrees(zoom);
     const minA = toDataA(0);
     const maxA = toDataA(size.width);
@@ -140,7 +189,7 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
       ctx.lineTo(x, size.height);
       ctx.stroke();
       ctx.fillStyle = palette.tickText;
-      ctx.fillText(formatAngleDegrees(a), x + 2, size.height - 14);
+      ctx.fillText(formatAngleDegrees(a, displayScale), x + 2, size.height - 14);
     }
     ctx.textBaseline = 'middle';
     for (let b = Math.ceil(minB / step) * step; b <= maxB; b += step) {
@@ -151,7 +200,7 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
       ctx.lineTo(size.width, y);
       ctx.stroke();
       ctx.fillStyle = palette.tickText;
-      ctx.fillText(formatAngleDegrees(b), 4, y - 12);
+      ctx.fillText(formatAngleDegrees(b, displayScale), 4, y - 12);
     }
 
     // Valid region scatter.
@@ -165,22 +214,20 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
         ctx.fillRect(x, y, 1.5, 1.5);
       } else {
         ctx.beginPath();
-        ctx.arc(x, y, 2.4, 0, Math.PI * 2);
+        ctx.arc(x, y, POINT_RADIUS_PX, 0, Math.PI * 2);
         ctx.fill();
       }
     });
 
-    // Currently committed A/B pair, highlighted distinctly from generated points.
+    // Currently committed A/B pair: same radius as every blue point, no
+    // outline/glow — only the orange fill color sets it apart.
     if (currentPoint) {
       const x = toScreenX(currentPoint.a);
       const y = toScreenY(currentPoint.b);
       ctx.fillStyle = '#f97316';
       ctx.beginPath();
-      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.arc(x, y, POINT_RADIUS_PX, 0, Math.PI * 2);
       ctx.fill();
-      ctx.strokeStyle = '#0b1016';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
     }
 
     // Hovered/pinned point marker.
@@ -194,7 +241,7 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
       ctx.arc(x, y, 6, 0, Math.PI * 2);
       ctx.stroke();
     }
-  }, [points, currentPoint, size, zoom, pan, hoverPoint, pinnedPoint, toScreenX, toScreenY, toDataA, toDataB, palette]);
+  }, [points, currentPoint, size, zoom, pan, hoverPoint, pinnedPoint, toScreenX, toScreenY, toDataA, toDataB, palette, displayScale]);
 
   const findNearestPoint = useCallback((screenX, screenY) => {
     const all = currentPoint ? [...points, currentPoint] : points;
@@ -223,15 +270,19 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
     if (!container) return undefined;
     const handleWheel = (e) => {
       e.preventDefault();
+      // Locking the view disables mouse-wheel zoom entirely.
+      if (isLocked) return;
       const direction = e.deltaY > 0 ? -1 : 1;
-      setZoom((prev) => Math.max(MIN_ZOOM, Math.min(prev * (direction > 0 ? WHEEL_ZOOM_FACTOR : 1 / WHEEL_ZOOM_FACTOR), MAX_ZOOM)));
+      setZoom((prev) => clampZoom(prev * (direction > 0 ? WHEEL_ZOOM_FACTOR : 1 / WHEEL_ZOOM_FACTOR)));
     };
     container.addEventListener('wheel', handleWheel, { passive: false });
     return () => container.removeEventListener('wheel', handleWheel);
-  }, []);
+  }, [isLocked]);
 
   const handleMouseDown = (e) => {
     if (e.button !== 0) return;
+    // Locking the view disables drag-to-pan entirely.
+    if (isLocked) return;
     setIsDragging(true);
     dragStart.current = { x: e.clientX, y: e.clientY };
   };
@@ -269,7 +320,7 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
             Angle B (degrees)
           </span>
         </div>
-        <div ref={containerRef} className="relative flex-1 min-w-0 min-h-0 border border-white/10 rounded-md overflow-hidden cursor-grab" style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
+        <div ref={containerRef} className="relative flex-1 min-w-0 min-h-0 border border-white/10 rounded-md overflow-hidden" style={{ cursor: isLocked ? 'not-allowed' : isDragging ? 'grabbing' : 'grab' }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
@@ -282,9 +333,9 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
               className="pointer-events-none absolute bg-[#101820]/95 border border-white/10 rounded-md px-2.5 py-1.5 text-[11px] font-mono text-slate-200 shadow-[0_8px_24px_rgba(0,0,0,0.32)]"
               style={{ left: Math.min(toScreenX(tooltipPoint.a) + 12, size.width - 140), top: Math.max(toScreenY(tooltipPoint.b) - 54, 4) }}
             >
-              <div>A = {formatAngleDegrees(tooltipPoint.a)}&deg;</div>
-              <div>B = {formatAngleDegrees(tooltipPoint.b)}&deg;</div>
-              <div className="text-slate-400">A+B = {formatAngleDegrees(tooltipPoint.a + tooltipPoint.b)}&deg;</div>
+              <div>A = {formatAngleDegrees(tooltipPoint.a, displayScale)}&deg;</div>
+              <div>B = {formatAngleDegrees(tooltipPoint.b, displayScale)}&deg;</div>
+              <div className="text-slate-400">A+B = {formatAngleDegrees(tooltipPoint.a + tooltipPoint.b, displayScale)}&deg;</div>
             </div>
           )}
         </div>
@@ -295,4 +346,6 @@ export default function AnglePlotPanel({ points, currentPoint, resetToken, theme
       </div>
     </div>
   );
-}
+});
+
+export default AnglePlotPanel;

@@ -10,5 +10,17 @@ export const createAnglePair = (angleA, angleB) => ({
   sum: angleA + angleB,
 });
 
-/** Formats a degree value to one decimal place, e.g. formatAngleDegrees(45) -> "45.0". */
-export const formatAngleDegrees = (degrees) => degrees.toFixed(1);
+/**
+ * Formats a degree value with enough decimal places to represent the
+ * current Angle Step exactly (`scale` = that step's decimal-place count),
+ * then trims trailing zeros so a coarse step (e.g. whole-number steps)
+ * doesn't force ugly ".000000" tails: formatAngleDegrees(45, 7) -> "45",
+ * formatAngleDegrees(45.1, 7) -> "45.1", formatAngleDegrees(45.1234567, 7)
+ * -> "45.1234567".
+ */
+export const formatAngleDegrees = (degrees, scale = 1) => {
+  const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 0;
+  const fixed = degrees.toFixed(safeScale);
+  if (!fixed.includes('.')) return fixed;
+  return fixed.replace(/0+$/, '').replace(/\.$/, '');
+};
