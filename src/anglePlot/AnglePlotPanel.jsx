@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
 import { formatAngleDegrees } from './AnglePair.js';
+import { MIN_CELL_SIZE_PX, MAX_CELL_SIZE_PX, MIN_VISIBLE_GRID_STEPS, ABSOLUTE_MAX_ZOOM_PX_PER_DEGREE } from './renderSamplingPolicy.js';
 
 // AnglePlotPanel: draws the scatter of valid (A, B) points and owns all
 // zoom/pan/hover interaction for the graph. Implemented with a plain
@@ -15,15 +16,12 @@ import { formatAngleDegrees } from './AnglePair.js';
 // A/B region is never stretched into a misleading shape), and `pan` is the
 // (A, B) point currently centered in the viewport.
 const MIN_ZOOM = 2;
-const MAX_ZOOM = 400;
 const WHEEL_ZOOM_FACTOR = 1.15;
 const POINT_HIT_RADIUS_PX = 7;
-// Above this many points, draw 1px dots instead of full circles — much
-// cheaper per point and still reads as a filled region at that density.
-const DENSE_POINT_THRESHOLD = 20000;
-// Shared by every plotted dot (valid points and the current-A/B highlight)
-// so the orange point is exactly the same size as the blue ones — only its
-// fill color differs.
+// Individual-point marker radius used in POINTS mode (see pickRenderMode
+// below) — the "normal" size referenced throughout this file, including for
+// the orange current-point marker, which always uses this radius regardless
+// of which mode the blue region is currently drawn in.
 const POINT_RADIUS_PX = 2.4;
 
 // The view "Reset View" restores — a fixed overview of the whole permitted
@@ -31,6 +29,11 @@ const POINT_RADIUS_PX = 2.4;
 // very first view before any generation has completed.
 const DEFAULT_ZOOM = 6;
 const DEFAULT_PAN = { a: 45, b: 45 };
+
+// zoomLevel is always *derived* from `zoom` (zoom / DEFAULT_ZOOM), never
+// stored independently, so it can never disagree with the actual visible
+// bounds. Exported for diagnostics/tests.
+export const MIN_ZOOM_LEVEL = MIN_ZOOM / DEFAULT_ZOOM;
 
 // Mirrors the light/dark values the main triangle canvas already uses
 // (THEME_PALETTES in App.jsx) so the two canvases stay visually consistent
@@ -49,7 +52,21 @@ const niceGridStepDegrees = (zoom) => {
   return 10;
 };
 
-const computeFitView = (points, currentPoint, width, height) => {
+// The maximum zoom (px/degree) this panel allows, tied to the user's actual
+// Angle Step rather than an arbitrary pixel constant: zooming in further
+// than MIN_VISIBLE_GRID_STEPS worth of that step across the viewport cannot
+// reveal any additional real detail (every point on screen would already be
+// adjacent grid points), so there is nothing gained by allowing it. Falls
+// back to the absolute sanity ceiling when no valid Angle Step is known yet
+// (e.g. before the field has been parsed once).
+const getMaxZoomPxPerDegree = (userStepDegrees, viewportWidthPx) => {
+  if (!Number.isFinite(userStepDegrees) || userStepDegrees <= 0) return ABSOLUTE_MAX_ZOOM_PX_PER_DEGREE;
+  const minVisibleWidth = userStepDegrees * MIN_VISIBLE_GRID_STEPS;
+  const dynamicMax = Math.max(viewportWidthPx, 1) / Math.max(minVisibleWidth, 1e-12);
+  return Math.min(dynamicMax, ABSOLUTE_MAX_ZOOM_PX_PER_DEGREE);
+};
+
+const computeFitView = (points, currentPoint, width, height, maxZoom) => {
   const all = currentPoint ? [...points, currentPoint] : points;
   if (all.length === 0) return { zoom: DEFAULT_ZOOM, pan: DEFAULT_PAN };
   let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
@@ -65,16 +82,43 @@ const computeFitView = (points, currentPoint, width, height) => {
   const zoom = Math.min(
     Math.max((width - padding) / spanA, MIN_ZOOM),
     Math.max((height - padding) / spanB, MIN_ZOOM),
-    MAX_ZOOM
+    maxZoom
   );
   return { zoom, pan: { a: (minA + maxA) / 2, b: (minB + maxB) / 2 } };
+};
+
+// Level-of-detail mode, chosen from how many screen pixels separate
+// adjacent sampled grid points (see pickRenderMode): plenty of room draws
+// individually-distinguishable circles; a tight-but-not-subpixel spacing
+// draws touching/slightly-overlapping markers sized to the gap so the
+// region reads as continuous; sub-pixel spacing switches to filled
+// rectangles ("occupancy cells") sized to the sampling cell so the region
+// reads as a solid raster instead of a sparse dot lattice with visible gaps.
+const RENDER_MODE = { POINTS: 'points', DENSE: 'dense', OCCUPANCY: 'occupancy' };
+const pickRenderMode = (projectedSpacingPx) => {
+  if (projectedSpacingPx >= 6) return RENDER_MODE.POINTS;
+  if (projectedSpacingPx >= 2) return RENDER_MODE.DENSE;
+  return RENDER_MODE.OCCUPANCY;
 };
 
 // forwardRef exposes imperative view controls (zoomIn/zoomOut/fitToPoints/
 // resetToDefaultView) to AnglePlotWindow's toolbar buttons, since "multiply
 // whatever the current zoom happens to be" can't be expressed as a plain
 // prop the way a one-shot "reset to X" signal can.
-const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint, theme, isLocked, displayScale }, ref) {
+//
+// `onViewChange` is called (undebounced) every time zoom, pan, or the
+// measured canvas size changes, reporting the current world bounds,
+// zoomLevel, and viewport pixel size. AnglePlotWindow owns the actual
+// debounce/regeneration decision (see RENDER_DEBOUNCE_MS in
+// renderSamplingPolicy.js) — this panel stays a "dumb" reporter of its own
+// viewport state so that policy lives in exactly one place.
+//
+// `gridStepDegrees` is the world-space spacing of the *current* point set
+// (the user's exact Angle Step in exact mode, or the adaptive render step
+// in adaptive mode) — used only to choose the level-of-detail draw mode
+// above, never to decide what to generate (that's AnglePlotWindow's job).
+// `userStepDegrees` is used only for the Angle-Step-aware zoom cap.
+const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint, theme, isLocked, displayScale, onViewChange, gridStepDegrees, userStepDegrees }, ref) {
   const palette = CANVAS_PALETTES[theme] || CANVAS_PALETTES.dark;
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
@@ -101,6 +145,9 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
     return () => observer.disconnect();
   }, []);
 
+  const maxZoom = getMaxZoomPxPerDegree(userStepDegrees, size.width);
+  const clampZoom = useCallback((value) => Math.max(MIN_ZOOM, Math.min(value, maxZoom)), [maxZoom]);
+
   // Fit the viewport to every generated point plus the currently selected
   // A/B pair on mount, and again any time the panel's real measured size
   // changes (the initial size is a placeholder until ResizeObserver reports
@@ -114,7 +161,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
   const [appliedSizeSignature, setAppliedSizeSignature] = useState(null);
   if (sizeSignature !== appliedSizeSignature) {
     setAppliedSizeSignature(sizeSignature);
-    const fit = computeFitView(points, currentPoint, size.width, size.height);
+    const fit = computeFitView(points, currentPoint, size.width, size.height, maxZoom);
     setZoom(fit.zoom);
     setPan(fit.pan);
   }
@@ -123,8 +170,6 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
   const toScreenY = useCallback((b) => size.height / 2 - (b - pan.b) * zoom, [size.height, pan.b, zoom]);
   const toDataA = useCallback((x) => pan.a + (x - size.width / 2) / zoom, [size.width, pan.a, zoom]);
   const toDataB = useCallback((y) => pan.b - (y - size.height / 2) / zoom, [size.height, pan.b, zoom]);
-
-  const clampZoom = (value) => Math.max(MIN_ZOOM, Math.min(value, MAX_ZOOM));
 
   // Imperative view controls used by AnglePlotWindow's Zoom In / Zoom Out /
   // Fit / Reset View buttons. Locking the view (the "Fix" button) disables
@@ -135,7 +180,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
     zoomOut: () => { if (!isLocked) setZoom((z) => clampZoom(z / WHEEL_ZOOM_FACTOR)); },
     fitToPoints: () => {
       if (isLocked) return;
-      const fit = computeFitView(points, currentPoint, size.width, size.height);
+      const fit = computeFitView(points, currentPoint, size.width, size.height, maxZoom);
       setZoom(fit.zoom);
       setPan(fit.pan);
     },
@@ -145,16 +190,41 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
       setPan(DEFAULT_PAN);
     },
     // The data-space rectangle currently visible in the canvas, used by
-    // AnglePlotWindow's "scope to current view" sweep option so a fine step
-    // only has to cover what's actually on screen instead of the full
-    // 0-90 domain.
+    // AnglePlotWindow's adaptive renderer so it only ever considers points
+    // that could actually be seen right now.
     getViewBounds: () => ({
       minA: toDataA(0),
       maxA: toDataA(size.width),
       minB: toDataB(size.height),
       maxB: toDataB(0),
     }),
-  }), [isLocked, points, currentPoint, size, toDataA, toDataB]);
+  }), [isLocked, points, currentPoint, size, maxZoom, clampZoom, toDataA, toDataB]);
+
+  // Report every zoom/pan/size change (including the very first one, once
+  // the real measured canvas size is known) so AnglePlotWindow can debounce
+  // a regeneration around it. This effect only *reports* — it never itself
+  // decides whether/when to regenerate, keeping that policy in one place.
+  //
+  // `onViewChange` is read through a ref (updated every render, below)
+  // rather than listed in this effect's own dependency array. AnglePlotWindow
+  // rebuilds that callback whenever its own `validateCandidate`/`baseLength`
+  // props change identity — which, in this app, is on nearly every parent
+  // render — and calling it lands a state update back in AnglePlotWindow.
+  // If the effect depended on the callback's identity directly, that state
+  // update would produce a new callback reference, re-running this effect,
+  // calling it again, and so on forever. Depending only on the actual
+  // viewport numbers below breaks that cycle: the effect re-fires on a real
+  // zoom/pan/size change, and always invokes whatever the latest callback is.
+  const onViewChangeRef = useRef(onViewChange);
+  onViewChangeRef.current = onViewChange;
+  useEffect(() => {
+    onViewChangeRef.current?.({
+      bounds: { minA: toDataA(0), maxA: toDataA(size.width), minB: toDataB(size.height), maxB: toDataB(0) },
+      zoomLevel: zoom / DEFAULT_ZOOM,
+      viewportSize: { width: size.width, height: size.height },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom, pan.a, pan.b, size.width, size.height]);
 
   // Redraw whenever the data, viewport, or hover/pin state changes.
   useEffect(() => {
@@ -203,24 +273,55 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
       ctx.fillText(formatAngleDegrees(b, displayScale), 4, y - 12);
     }
 
-    // Valid region scatter.
-    const dense = points.length > DENSE_POINT_THRESHOLD;
+    // Valid region scatter. The draw mode is picked from how many screen
+    // pixels separate adjacent *sampled* grid points (gridStepDegrees x
+    // zoom, the actual px/degree) — not from the point count — so a sparse
+    // exact-mode result at low zoom and a dense adaptive result at high
+    // zoom both pick the mode that actually matches what's distinguishable
+    // on screen right now. See the RENDER_MODE comment above.
+    const projectedSpacingPx = Number.isFinite(gridStepDegrees) && gridStepDegrees > 0 ? gridStepDegrees * zoom : Infinity;
+    const mode = pickRenderMode(projectedSpacingPx);
     ctx.fillStyle = palette.point;
-    points.forEach((p) => {
-      const x = toScreenX(p.a);
-      const y = toScreenY(p.b);
-      if (x < -5 || x > size.width + 5 || y < -5 || y > size.height + 5) return;
-      if (dense) {
-        ctx.fillRect(x, y, 1.5, 1.5);
-      } else {
+    if (mode === RENDER_MODE.OCCUPANCY) {
+      // Filled squares sized to the sampling cell (with a hair of overlap
+      // so pixel rounding never leaves a one-pixel crack between
+      // neighbors), not large circles over a coarse grid — a solid raster
+      // built only from cells that actually contain a real valid point.
+      const cellPx = Math.min(MAX_CELL_SIZE_PX, Math.max(MIN_CELL_SIZE_PX, projectedSpacingPx));
+      const half = cellPx / 2 + 0.5;
+      points.forEach((p) => {
+        const x = toScreenX(p.a);
+        const y = toScreenY(p.b);
+        if (x < -half || x > size.width + half || y < -half || y > size.height + half) return;
+        ctx.fillRect(x - half, y - half, cellPx + 1, cellPx + 1);
+      });
+    } else if (mode === RENDER_MODE.DENSE) {
+      // Markers sized to touch/slightly overlap their neighbors instead of
+      // leaving the fixed small POINTS-mode radius floating in visible gaps.
+      const radius = Math.min(MAX_CELL_SIZE_PX / 2, Math.max(MIN_CELL_SIZE_PX / 2, projectedSpacingPx / 2 + 0.5));
+      points.forEach((p) => {
+        const x = toScreenX(p.a);
+        const y = toScreenY(p.b);
+        if (x < -radius - 5 || x > size.width + radius + 5 || y < -radius - 5 || y > size.height + radius + 5) return;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    } else {
+      points.forEach((p) => {
+        const x = toScreenX(p.a);
+        const y = toScreenY(p.b);
+        if (x < -5 || x > size.width + 5 || y < -5 || y > size.height + 5) return;
         ctx.beginPath();
         ctx.arc(x, y, POINT_RADIUS_PX, 0, Math.PI * 2);
         ctx.fill();
-      }
-    });
+      });
+    }
 
-    // Currently committed A/B pair: same radius as every blue point, no
-    // outline/glow — only the orange fill color sets it apart.
+    // Currently committed A/B pair: always the normal individual-point
+    // radius (never enlarged/shrunk by the region's current LOD mode) and
+    // always drawn after the blue region so it is never hidden inside an
+    // occupancy cell — only the orange fill color sets it apart.
     if (currentPoint) {
       const x = toScreenX(currentPoint.a);
       const y = toScreenY(currentPoint.b);
@@ -241,7 +342,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
       ctx.arc(x, y, 6, 0, Math.PI * 2);
       ctx.stroke();
     }
-  }, [points, currentPoint, size, zoom, pan, hoverPoint, pinnedPoint, toScreenX, toScreenY, toDataA, toDataB, palette, displayScale]);
+  }, [points, currentPoint, size, zoom, pan, hoverPoint, pinnedPoint, toScreenX, toScreenY, toDataA, toDataB, palette, displayScale, gridStepDegrees]);
 
   const findNearestPoint = useCallback((screenX, screenY) => {
     const all = currentPoint ? [...points, currentPoint] : points;
@@ -277,7 +378,7 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
     };
     container.addEventListener('wheel', handleWheel, { passive: false });
     return () => container.removeEventListener('wheel', handleWheel);
-  }, [isLocked]);
+  }, [isLocked, clampZoom]);
 
   const handleMouseDown = (e) => {
     if (e.button !== 0) return;
