@@ -2020,7 +2020,7 @@ export default function App() {
                     step="0.0001"
                     value={angleIncrementInput}
                     onChange={e => setAngleIncrementInput(e.target.value)}
-                    title="Native number-stepper increment for Angle A and Angle B."
+                    title="Increment for the Angle A/B number steppers, and the exact grid step used by Plot Valid Angle Region (e.g. 1, 0.1, 0.01, 0.0000003)."
                     className="w-full bg-[#0b1016] border border-white/10 rounded-md px-2.5 py-1.5 text-sm focus:bg-[#101923] focus:border-cyan-300 focus:ring-1 focus:ring-cyan-300 outline-none font-mono text-slate-100 transition-all"
                   />
                 </div>
@@ -2425,7 +2425,10 @@ export default function App() {
               {simulatorMode === 'code' && activeTriangles.length > 0 && (() => {
                 const markers = [];
                 const seen = new Set();
-                const allTris = [baseTriangle, ...activeTriangles];
+                // activeTriangles includes one trailing look-ahead triangle used only to
+                // compute the final shot endpoint (see visibleActiveTriangles above) — its
+                // apex is never drawn as a triangle, so it must not get a vertex marker either.
+                const allTris = [baseTriangle, ...visibleActiveTriangles];
 
                 for (const tri of allTris) {
                   for (const vertexIdx of [0, 1, 2]) {
@@ -2636,7 +2639,9 @@ export default function App() {
                 };
 
                 processTriangles([baseTriangle], false);
-                processTriangles(activeTriangles, true);
+                // Same trailing look-ahead triangle excluded above: it has no drawn
+                // polygon, so it should not produce hover annotations either.
+                processTriangles(visibleActiveTriangles, true);
                 
                 return labelsToRender;
               })()}
@@ -2659,6 +2664,7 @@ export default function App() {
           refreshToken={anglePlotRequestId}
           onClose={() => setIsAnglePlotOpen(false)}
           theme={theme}
+          angleStepInput={angleIncrementInput}
         />
       )}
 

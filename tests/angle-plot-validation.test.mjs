@@ -3,8 +3,6 @@ import test from 'node:test';
 import {
   isValidAnglePair,
   isWithinObtuseSumLimit,
-  degreesToTenths,
-  tenthsToDegrees,
   ANGLE_EPSILON_DEGREES,
   OBTUSE_THIRD_ANGLE_LIMIT_DEGREES,
 } from '../src/anglePlot/angleValidation.js';
@@ -63,12 +61,19 @@ test('validateCandidate receives the exact angle values and the supplied base le
   assert.deepEqual(received, { a: 12.3, b: 60.4, length: 10 });
 });
 
-test('degreesToTenths/tenthsToDegrees round-trip exactly on the 0.1-degree grid', () => {
-  for (const degrees of [0.1, 15, 44.9, 45.1, 89.9]) {
-    const tenths = degreesToTenths(degrees);
-    assert.equal(Number.isInteger(tenths), true);
-    assert.equal(tenthsToDegrees(tenths), degrees);
-  }
+test('isValidAnglePair accepts a caller-supplied epsilon smaller than the default', () => {
+  // Fine grid steps (e.g. 0.0000003) are smaller than ANGLE_EPSILON_DEGREES,
+  // so generateAngleRegion passes a tighter epsilon; two points exactly one
+  // such tiny step apart must still be treated as A < B.
+  // Sum stays safely under 90 regardless of epsilon, so this isolates the
+  // A < B comparison from the separate sum-limit comparison.
+  const tinyGap = 3e-7;
+  const a = 10;
+  const b = 10 + tinyGap;
+  // With the default epsilon (1e-6 > tinyGap) the pair is wrongly rejected.
+  assert.equal(isValidAnglePair(a, b), false);
+  // With an epsilon scaled to the step, the same pair is correctly accepted.
+  assert.equal(isValidAnglePair(a, b, { epsilon: tinyGap / 1000 }), true);
 });
 
 test('OBTUSE_THIRD_ANGLE_LIMIT_DEGREES is the single named place governing <=90 vs <90', () => {
