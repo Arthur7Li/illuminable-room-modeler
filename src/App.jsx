@@ -501,6 +501,12 @@ const unfoldCodeData = (billiardsCode, baseTriangle, enabled = true) => {
   return { triangles, parsedSequence, idxToAngle, angleToIdx, sideSequence, reflectionEdges };
 };
 
+/** Returns the complete reflected chain that belongs on the canvas. */
+const getRenderableActiveTriangles = (activeTriangles) => {
+  // Every code-mode triangle is produced by a real reflection; none is look-ahead geometry.
+  return activeTriangles;
+};
+
 /** Builds the endpoint-defined shot line used by code-mode validation. */
 const getShotGeometry = (baseTriangle, activeTriangles, labelsMap) => {
   // Physical A is the current source/target vertex convention for the shot.
@@ -982,6 +988,7 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
   };
 
   // Walk every triangle copy in unfolded order.
+  console.log("ALL TRIANGLES");
   for (const tri of allTris) {
     // Check every physical vertex, not only the symbolic fan endpoints.
     for (let vertexIdx = 0; vertexIdx < 3; vertexIdx++) {
@@ -1001,6 +1008,7 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
       const score = point.y - lineY;
       // Shot endpoints are singular endpoints, not interior vertex obstructions.
       const isShotEndpoint = isShotEndpointCoordinate(point, shotGeometry, endpointTolerance);
+      console.log(isShotEndpoint, point, tri.id);
       // Endpoint vertices render red; all others render their formal tower role.
       const vertexColor = isShotEndpoint ? ENDPOINT_VERTEX_COLOR : getTowerRoleColor(roleRecord?.role);
       // Black and red markers need light label text for legibility.
@@ -1087,8 +1095,12 @@ const buildPoolshotTowerValidation = ({ simulatorMode, baseTriangle, activeTrian
     }
   }
 
+  console.log("END");
+
   // Report tower-color contradictions as validation failures.
   for (const conflict of towerColoring.conflicts) {
+    // A conflict at either singular shot endpoint cannot obstruct or invalidate the line.
+    if (conflict.point && isShotEndpointCoordinate(conflict.point, shotGeometry, endpointTolerance)) continue;
     // Count each conflict in the invalid total.
     invalid++;
     // Keep the sidebar readable.
@@ -1675,8 +1687,8 @@ export default function App() {
   // Ghost-mode shots keep the base guide color when valid and switch to a lighter red when invalid.
   const shotLineVisualColor = isGhostedShot && shotClearanceValidation.status === 'invalid' ? INVALID_SHOT_COLOR : VALID_SHOT_COLOR;
 
-  // Rendering omits the terminal reflected triangle while keeping it available for validation.
-  const visibleActiveTriangles = simulatorMode === 'code' && activeTriangles.length > 1 ? activeTriangles.slice(0, -1) : activeTriangles;
+  // Render the full reflected chain, including the triangle containing the final shot endpoint.
+  const renderableActiveTriangles = getRenderableActiveTriangles(activeTriangles);
 
   const getTriangleRenderStyle = (tri) => ({
     color: tri.color,
@@ -2231,6 +2243,9 @@ export default function App() {
                         <span className="font-mono font-bold">{violation.triId}</span>
                         <span className="font-mono"> {violation.symbol}</span> expected {violation.expected}; dy =
                         <span className="font-mono"> {formatExponential(violation.score)}</span>
+                        {violation.point && (
+                          <span className="font-mono">; vertex = ({formatPoint(violation.point)})</span>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -2370,7 +2385,7 @@ export default function App() {
               </g>
 
               {/* Generated Reflections - Glassy geometry look */}
-              {visibleActiveTriangles.map(tri => {
+              {renderableActiveTriangles.map(tri => {
                 const triangleStyle = getTriangleRenderStyle(tri);
                 return (
                   <polygon
@@ -2425,10 +2440,8 @@ export default function App() {
               {simulatorMode === 'code' && activeTriangles.length > 0 && (() => {
                 const markers = [];
                 const seen = new Set();
-                // activeTriangles includes one trailing look-ahead triangle used only to
-                // compute the final shot endpoint (see visibleActiveTriangles above) — its
-                // apex is never drawn as a triangle, so it must not get a vertex marker either.
-                const allTris = [baseTriangle, ...visibleActiveTriangles];
+                // Mark every triangle occurrence that participates in the rendered tower.
+                const allTris = [baseTriangle, ...renderableActiveTriangles];
 
                 for (const tri of allTris) {
                   for (const vertexIdx of [0, 1, 2]) {
@@ -2525,7 +2538,7 @@ export default function App() {
                         fontStyle: 'italic'
                       }}
                     >
-                      {angleLabel}
+                      {angleLabel + ` (${vertexIdx})`}
                     </text>
                   );
                 });
@@ -2639,9 +2652,8 @@ export default function App() {
                 };
 
                 processTriangles([baseTriangle], false);
-                // Same trailing look-ahead triangle excluded above: it has no drawn
-                // polygon, so it should not produce hover annotations either.
-                processTriangles(visibleActiveTriangles, true);
+                // Hover annotations cover the same complete reflected chain as the polygons.
+                processTriangles(renderableActiveTriangles, true);
                 
                 return labelsToRender;
               })()}
