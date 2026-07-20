@@ -2,7 +2,10 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { X, RotateCcw, RefreshCw, Loader2, GripHorizontal, ZoomIn, ZoomOut, Maximize, Lock, Unlock, AlertTriangle } from 'lucide-react';
 import AnglePlotPanel from './AnglePlotPanel.jsx';
 import { generateAngleRegion } from './generateAngleRegion.js';
-import { parseAngleStep, estimateAngleGridIterations, displayScaleForStep, MAX_ANGLE_GRID_ITERATIONS } from './angleStep.js';
+import { generateVisibleAnglePoints } from './visibleAnglePointGenerator.js';
+import { parseAngleStep, displayScaleForStep, isExactModeStep, estimateAngleGridIterations, MAX_ANGLE_GRID_ITERATIONS } from './angleStep.js';
+import { RENDER_DEBOUNCE_MS } from './renderSamplingPolicy.js';
+import { formatAngleDegrees } from './AnglePair.js';
 
 // AnglePlotWindow: the pop-up "Valid Angle A-B Region" graph. This project
 // is a browser React app, not a desktop toolkit, so there is no native OS
@@ -22,6 +25,30 @@ import { parseAngleStep, estimateAngleGridIterations, displayScaleForStep, MAX_A
 // interact or share state; they just happen to share a name because they
 // serve the same purpose ("stop the view from moving") in two different
 // views.
+//
+// Exact vs. adaptive rendering
+// ------------------------------
+// Two generation strategies, switched automatically on the user's Angle
+// Step (see isExactModeStep / EXACT_MODE_STEP_THRESHOLD in angleStep.js):
+//
+// - Exact mode (Angle Step >= 0.1): generateAngleRegion.js's full-domain
+//   exact sweep. Generated once (mount, Angle Step/constraint change, or
+//   explicit Refresh) and then reused as-is while the user zooms/pans —
+//   zoom and pan never trigger regeneration in this mode, matching "the
+//   mathematical dataset does not change just because the viewport did".
+//   Guarded by the same MAX_ANGLE_GRID_ITERATIONS safety dialog the
+//   original brute-force version of this feature used.
+//
+// - Adaptive mode (Angle Step < 0.1): visibleAnglePointGenerator.js's
+//   visible-region, zoom-scaled cell sampling. Regenerates (debounced,
+//   RENDER_DEBOUNCE_MS) on every zoom/pan/resize/Angle-Step/constraint
+//   change, since what's tractable to compute depends on what's on screen.
+//
+// Both paths funnel through the same requestId/task-cancellation guard
+// below so a slow superseded render can never overwrite a newer one, and
+// both report into the same `points`/`status`/`progress`/`renderInfo`
+// state so AnglePlotPanel and the status line don't need to know which
+// mode produced what they're displaying.
 
 const DEFAULT_SIZE = { width: 640, height: 480 };
 const MIN_SIZE = { width: 380, height: 320 };
@@ -34,96 +61,193 @@ export default function AnglePlotWindow({ angleParams, baseLength, validateCandi
 
   const [points, setPoints] = useState([]);
   const [status, setStatus] = useState('idle'); // idle | running | done | cancelled
-  const [progress, setProgress] = useState({ tested: 0, total: 0, found: 0 });
+  const [progress, setProgress] = useState({ mode: 'adaptive', cellsChecked: 0, found: 0 });
   const [stepError, setStepError] = useState(null);
-  const [pendingLargeSweep, setPendingLargeSweep] = useState(null); // { scale, stepUnits, stepDegrees, estimatedIterations, viewBounds } | null
   const [isViewLocked, setIsViewLocked] = useState(false);
-  // When on, Generate/Refresh only sweeps the region currently visible in
-  // the panel instead of the full 0-90 domain — the practical way to use a
-  // very fine Angle Step (e.g. 0.001): zoom into the area of interest first,
-  // then a fine step only has to cover that small area rather than testing
-  // billions of candidates across the whole permitted triangle.
-  const [scopeToView, setScopeToView] = useState(false);
+  const [pendingLargeExactSweep, setPendingLargeExactSweep] = useState(null); // { scale, stepUnits, stepDegrees, estimatedIterations } | null
+  // { mode, zoomLevel?, userStepDegrees, gridStepDegrees, requestedStepDegrees?, pointCount, durationMs, budgetLimited } | null
+  const [renderInfo, setRenderInfo] = useState(null);
   const taskRef = useRef(null);
+  const requestIdRef = useRef(0);
+  const debounceTimerRef = useRef(null);
+  const lastViewStateRef = useRef(null); // { bounds, zoomLevel, viewportSize } | null, most recent view AnglePlotPanel reported
   const panelRef = useRef(null);
 
   const currentPoint = { a: Number(angleParams.a), b: Number(angleParams.b) };
   // Falls back to whole-degree display (matches the historical 0.1-step
-  // behavior's precision) if a sweep hasn't successfully validated a step yet.
+  // behavior's precision) if a render hasn't successfully validated a step yet.
   const [displayScale, setDisplayScale] = useState(1);
 
-  const startSweep = useCallback((parsedStep, viewBounds) => {
-    // Cancel any sweep still in flight before starting a new one so two
-    // generations can never race and overwrite each other's results.
+  // Cheap to recompute per render (string parse + BigInt construction, no
+  // generation work) — used to drive AnglePlotPanel's Angle-Step-aware zoom
+  // cap immediately as the user types, without waiting for a render to finish.
+  const liveParsedStep = parseAngleStep(angleStepInput);
+
+  const startExactSweep = useCallback((parsed) => {
     taskRef.current?.cancel();
+    const requestId = ++requestIdRef.current;
     setStatus('running');
-    setProgress({ tested: 0, total: 0, found: 0 });
-    setDisplayScale(displayScaleForStep(parsedStep.scale));
+    setProgress({ mode: 'exact', tested: 0, total: 0, found: 0 });
+    setDisplayScale(displayScaleForStep(parsed.scale));
+    const startedAt = performance.now();
     const task = generateAngleRegion({
-      validateCandidate,
-      baseLength,
-      scale: parsedStep.scale,
-      stepUnits: parsedStep.stepUnits,
-      viewBounds,
+      validateCandidate, baseLength, scale: parsed.scale, stepUnits: parsed.stepUnits,
       onProgress: (p) => {
-        setProgress(p);
+        if (requestIdRef.current !== requestId) return;
+        setProgress({ mode: 'exact', ...p });
+        if (p.done) setStatus(p.cancelled ? 'cancelled' : 'done');
+      },
+    });
+    taskRef.current = task;
+    task.promise.then((resultPoints) => {
+      if (requestIdRef.current !== requestId) return;
+      setPoints(resultPoints);
+      setRenderInfo({
+        mode: 'exact', userStepDegrees: parsed.stepDegrees, gridStepDegrees: parsed.stepDegrees,
+        displayScale: displayScaleForStep(parsed.scale),
+        pointCount: resultPoints.length, durationMs: performance.now() - startedAt, budgetLimited: false,
+      });
+    });
+  }, [validateCandidate, baseLength]);
+
+  const runExactRender = useCallback((parsed) => {
+    setPendingLargeExactSweep(null);
+    const estimatedIterations = estimateAngleGridIterations(parsed.scale, parsed.stepUnits, undefined);
+    if (estimatedIterations > BigInt(MAX_ANGLE_GRID_ITERATIONS)) {
+      setPendingLargeExactSweep({ ...parsed, estimatedIterations });
+      setStatus('idle');
+      return;
+    }
+    startExactSweep(parsed);
+  }, [startExactSweep]);
+
+  const confirmLargeExactSweep = () => {
+    if (!pendingLargeExactSweep) return;
+    const { estimatedIterations, ...parsed } = pendingLargeExactSweep;
+    setPendingLargeExactSweep(null);
+    startExactSweep(parsed);
+  };
+
+  const runAdaptiveRender = useCallback((parsed, viewState) => {
+    if (!viewState) return; // AnglePlotPanel hasn't reported a view yet
+    taskRef.current?.cancel();
+    const requestId = ++requestIdRef.current;
+    setStatus('running');
+    setProgress({ mode: 'adaptive', cellsChecked: 0, found: 0 });
+    setDisplayScale(displayScaleForStep(parsed.scale));
+    const startedAt = performance.now();
+    const task = generateVisibleAnglePoints({
+      validateCandidate, baseLength, scale: parsed.scale, stepUnits: parsed.stepUnits,
+      viewBounds: viewState.bounds, viewportSize: viewState.viewportSize, zoomLevel: viewState.zoomLevel,
+      excludePoint: currentPoint,
+      onProgress: (p) => {
+        if (requestIdRef.current !== requestId) return;
+        setProgress({ mode: 'adaptive', ...p });
         if (p.done) setStatus(p.cancelled ? 'cancelled' : 'done');
       },
     });
     taskRef.current = task;
     task.promise.then((result) => {
-      if (taskRef.current === task) setPoints(result);
+      if (requestIdRef.current !== requestId) return;
+      setPoints(result.points);
+      setRenderInfo({
+        mode: 'adaptive', zoomLevel: viewState.zoomLevel, userStepDegrees: parsed.stepDegrees,
+        gridStepDegrees: result.effectiveStepDegrees, requestedStepDegrees: result.requestedStepDegrees,
+        displayScale: displayScaleForStep(parsed.scale),
+        pointCount: result.points.length, durationMs: performance.now() - startedAt,
+        budgetLimited: result.budgetLimited, timeLimited: result.timeLimited,
+      });
     });
-  }, [validateCandidate, baseLength]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [validateCandidate, baseLength, currentPoint.a, currentPoint.b]);
 
-  // Validates the Angle Step field and either starts the sweep immediately,
-  // reports a clear validation error, or — if the step is so small the
-  // sweep would be enormous — pauses for explicit confirmation instead of
-  // silently freezing or capping the step behind the user's back. When
-  // "scope to view" is on, the current panel viewport narrows the sweep (and
-  // therefore the estimate) before that safety check even runs.
-  const runGeneration = useCallback(() => {
+  // Top-level dispatcher: validates the Angle Step and routes to whichever
+  // mode it selects. Exact mode ignores `viewState` entirely (full domain,
+  // reused across the viewport); adaptive mode requires one to have been
+  // reported by AnglePlotPanel yet (silently no-ops otherwise — it will be
+  // called again as soon as that first report arrives).
+  const runRender = useCallback((viewState) => {
     setStepError(null);
-    setPendingLargeSweep(null);
     const parsed = parseAngleStep(angleStepInput);
     if (!parsed.valid) {
       setStepError(parsed.error);
-      setStatus('idle');
       return;
     }
-    const viewBounds = scopeToView ? panelRef.current?.getViewBounds() : undefined;
-    const estimatedIterations = estimateAngleGridIterations(parsed.scale, parsed.stepUnits, viewBounds);
-    if (estimatedIterations > BigInt(MAX_ANGLE_GRID_ITERATIONS)) {
-      setPendingLargeSweep({ ...parsed, estimatedIterations, viewBounds });
-      setStatus('idle');
-      return;
+    if (isExactModeStep(parsed.scale, parsed.stepUnits)) {
+      runExactRender(parsed);
+    } else {
+      runAdaptiveRender(parsed, viewState);
     }
-    startSweep(parsed, viewBounds);
-  }, [angleStepInput, scopeToView, startSweep]);
+  }, [angleStepInput, runExactRender, runAdaptiveRender]);
 
-  const confirmLargeSweep = () => {
-    if (!pendingLargeSweep) return;
-    const { viewBounds, ...parsed } = pendingLargeSweep;
-    setPendingLargeSweep(null);
-    startSweep(parsed, viewBounds);
-  };
+  // Debounces the actual (expensive) render behind RENDER_DEBOUNCE_MS of
+  // quiet time, so rapid wheel ticks / button clicks / drag movement / typed
+  // digits collapse into a single render once things settle. `immediate`
+  // skips the wait for the explicit Refresh button and the very first render
+  // after opening the window, where waiting would just look like lag.
+  const scheduleRender = useCallback((viewState, { immediate = false } = {}) => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (immediate) {
+      runRender(viewState);
+    } else {
+      debounceTimerRef.current = setTimeout(() => {
+        debounceTimerRef.current = null;
+        runRender(viewState);
+      }, RENDER_DEBOUNCE_MS);
+    }
+  }, [runRender]);
+
+  // AnglePlotPanel reports every zoom/pan/resize here, undebounced. In
+  // adaptive mode that's routed into a debounced render, exactly as before.
+  // In exact mode the dataset doesn't depend on the viewport at all, so the
+  // view is still recorded (for the zoom cap and a future mode switch) but
+  // does *not* trigger regeneration — AnglePlotPanel redraws the existing
+  // exact dataset at the new zoom/pan on its own.
+  const handleViewChange = useCallback((viewState) => {
+    lastViewStateRef.current = viewState;
+    const parsed = parseAngleStep(angleStepInput);
+    if (parsed.valid && !isExactModeStep(parsed.scale, parsed.stepUnits)) {
+      scheduleRender(viewState);
+    }
+  }, [angleStepInput, scheduleRender]);
+
+  const runGeneration = useCallback(() => {
+    scheduleRender(lastViewStateRef.current, { immediate: true });
+  }, [scheduleRender]);
 
   // Regenerate whenever the parent asks for a fresh plot (Plot Valid Angle
-  // Region button) and once on mount. The kickoff is deferred a tick so the
-  // setState calls inside runGeneration happen from a callback rather than
-  // synchronously in the effect body (the "Generate/Refresh Plot" button
-  // below calls runGeneration directly and gets the immediate synchronous
-  // feedback; this path just needs to not fire on every render). Cancel
-  // in-flight work on unmount so a closed window never calls setState after
-  // it stops existing.
+  // Region button), once on mount, and whenever the Angle Step field itself
+  // changes (debounced, so typing a new value doesn't fire a render per
+  // keystroke, and so a mode switch at the 0.1 threshold settles once
+  // typing pauses). The mount/refresh kickoff is deferred a tick so it runs
+  // after AnglePlotPanel's own mount-time onViewChange call has populated
+  // lastViewStateRef. Cancel in-flight work on unmount so a closed window
+  // never calls setState after it stops existing.
   useEffect(() => {
-    const timeoutId = setTimeout(runGeneration, 0);
+    const timeoutId = setTimeout(() => scheduleRender(lastViewStateRef.current, { immediate: true }), 0);
     return () => {
       clearTimeout(timeoutId);
       taskRef.current?.cancel();
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshToken]);
+
+  // Skips the very first run (mount already triggers its own immediate
+  // render above via the [refreshToken] effect) so opening the window
+  // doesn't queue a redundant second, debounced render on top of it.
+  const isFirstAngleStepRender = useRef(true);
+  useEffect(() => {
+    if (isFirstAngleStepRender.current) {
+      isFirstAngleStepRender.current = false;
+      return;
+    }
+    scheduleRender(lastViewStateRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [angleStepInput]);
 
   // --- Title-bar drag -------------------------------------------------
   const handleTitleMouseDown = (e) => {
@@ -165,8 +289,42 @@ export default function AnglePlotWindow({ angleParams, baseLength, validateCandi
     resizeStart.current = { startX: e.clientX, startY: e.clientY, startWidth: size.width, startHeight: size.height };
   };
 
-  const percent = progress.total > 0 ? Math.min(100, Math.round((progress.tested / progress.total) * 100)) : 0;
   const viewButtonClass = "flex items-center gap-1.5 bg-[#101820]/95 hover:bg-[#172230] disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 px-2.5 py-1.5 rounded-md text-[11px] font-bold";
+
+  // Status line: mode-aware, and deliberately built from the *last
+  // completed* render's info (renderInfo), not the in-flight one, so it
+  // doesn't flicker mid-render. See the module comment for why exact vs.
+  // adaptive mode is chosen automatically from the Angle Step.
+  let statusLine = null;
+  let statusTitle = undefined;
+  if (renderInfo) {
+    // Uses renderInfo's own displayScale (captured alongside the step
+    // values it renders, from displayScaleForStep(parsed.scale) at the
+    // moment that render completed) rather than a hardcoded decimal count:
+    // a fixed "6 decimals" rounds a step like 0.0000003 (7 decimals) to
+    // "0°", silently losing the very precision this status line exists to
+    // report.
+    const scale = renderInfo.displayScale;
+    if (renderInfo.mode === 'exact') {
+      statusLine = `Exact · Step ${formatAngleDegrees(renderInfo.gridStepDegrees, scale)}° · ${renderInfo.pointCount.toLocaleString()} point${renderInfo.pointCount === 1 ? '' : 's'}`;
+    } else {
+      const budgetNote = renderInfo.budgetLimited ? ' · budget limited' : '';
+      // timeLimited (MAX_ADAPTIVE_RENDER_MS) is the more serious of the two
+      // caps: it means the render was cut off before covering its whole
+      // budgeted area, so the result may be an incomplete partial view, not
+      // just a coarser-than-ideal one — worth a visibly different label.
+      const timeNote = renderInfo.timeLimited ? ' · stopped early (partial)' : '';
+      statusLine = `Adaptive · Zoom ${renderInfo.zoomLevel.toFixed(2)}× · User step ${formatAngleDegrees(renderInfo.userStepDegrees, scale)}° · Render step ${formatAngleDegrees(renderInfo.gridStepDegrees, scale)}° · ${renderInfo.pointCount.toLocaleString()} point${renderInfo.pointCount === 1 ? '' : 's'}${budgetNote}${timeNote}`;
+      statusTitle = renderInfo.timeLimited
+        ? `Render was stopped after taking too long for this view and may not cover the whole visible area — try zooming in or panning to a smaller region.`
+        : renderInfo.budgetLimited
+        ? `Requested render step: ${formatAngleDegrees(renderInfo.requestedStepDegrees, scale)}° · Applied: ${formatAngleDegrees(renderInfo.gridStepDegrees, scale)}° · Reason: sample-cell budget exceeded for this view`
+        : statusLine;
+    }
+  }
+  const runningLabel = progress.mode === 'exact'
+    ? `Exact · Testing… ${(progress.tested || 0).toLocaleString()} / ${(progress.total || 0).toLocaleString()}, ${(progress.found || 0).toLocaleString()} found`
+    : `Adaptive · Testing… ${(progress.cellsChecked || 0).toLocaleString()} checked, ${(progress.found || 0).toLocaleString()} found`;
 
   return (
     <div
@@ -187,12 +345,13 @@ export default function AnglePlotWindow({ angleParams, baseLength, validateCandi
         </button>
       </div>
 
-      {/* Controls + status. */}
+      {/* Controls. */}
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-white/10 shrink-0">
         <button
           type="button"
           onClick={runGeneration}
           disabled={status === 'running'}
+          title="Immediately regenerate using the current view and Angle Step, without waiting for the debounce delay."
           className="flex items-center gap-1.5 bg-[#101820]/95 hover:bg-[#172230] disabled:opacity-50 text-slate-200 px-2.5 py-1.5 rounded-md text-[11px] font-bold"
         >
           {status === 'running' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
@@ -214,18 +373,6 @@ export default function AnglePlotWindow({ angleParams, baseLength, validateCandi
           <RotateCcw className="w-3.5 h-3.5" />
           Reset View
         </button>
-        <label
-          className="flex items-center gap-1.5 bg-[#101820]/95 px-2.5 py-1.5 rounded-md text-[11px] font-bold text-slate-200 cursor-pointer select-none"
-          title="Only sweep the region currently visible in the graph below, instead of the full 0-90 degree domain. Zoom into an area first, then use a very fine Angle Step to inspect it in detail without testing the whole triangle."
-        >
-          <input
-            type="checkbox"
-            checked={scopeToView}
-            onChange={(e) => setScopeToView(e.target.checked)}
-            className="accent-cyan-400"
-          />
-          Scope to current view
-        </label>
         <button
           type="button"
           onClick={() => setIsViewLocked((locked) => !locked)}
@@ -243,19 +390,31 @@ export default function AnglePlotWindow({ angleParams, baseLength, validateCandi
         >
           Close
         </button>
-        <div className="ml-auto text-[11px] font-mono text-slate-400 text-right">
-          {status === 'running' ? (
-            <span>Testing&hellip; {progress.tested.toLocaleString()} / {progress.total.toLocaleString()} ({percent}%)</span>
-          ) : (
-            <span>{points.length.toLocaleString()} valid point{points.length === 1 ? '' : 's'} found{status === 'cancelled' ? ' (cancelled)' : ''}</span>
-          )}
-        </div>
       </div>
-      {status === 'running' && (
-        <div className="h-1 bg-[#0c1117] shrink-0">
-          <div className="h-full bg-cyan-400/70 transition-[width]" style={{ width: `${percent}%` }} />
-        </div>
-      )}
+
+      {/* Status: its own always-mounted, single-line row (whitespace-nowrap,
+          not flex-wrap) so its length — which varies a lot between "Exact ·
+          Step 0.1° · 5,997 points" and the longer adaptive string — can
+          never change this row's height. An earlier version had this text
+          inline in the button row above; a longer string could occasionally
+          push the buttons onto a second line, shrinking the canvas below by
+          a few pixels, firing ResizeObserver, re-fitting the zoom, and
+          triggering another render whose status text changed the width
+          again — a genuine infinite loop, observed live during testing. */}
+      <div
+        className="px-3 py-1.5 border-b border-white/10 shrink-0 text-[11px] font-mono text-slate-400 whitespace-nowrap overflow-x-auto"
+        title={statusTitle}
+      >
+        {status === 'running'
+          ? runningLabel
+          : `${statusLine || `${points.length.toLocaleString()} valid point${points.length === 1 ? '' : 's'} found`}${status === 'cancelled' ? ' (cancelled)' : ''}`}
+      </div>
+      {/* Always mounted (not conditionally rendered on status==='running')
+          for the same reason as the status row above: this must never
+          appear/disappear from the layout. */}
+      <div className="h-1 bg-[#0c1117] shrink-0 overflow-hidden">
+        {status === 'running' && <div className="h-full w-1/3 bg-cyan-400/70 animate-pulse" />}
+      </div>
 
       {stepError && (
         <div className="flex items-start gap-2 px-3 py-2 border-b border-red-400/30 bg-red-500/10 text-[11px] text-red-200 shrink-0">
@@ -264,21 +423,20 @@ export default function AnglePlotWindow({ angleParams, baseLength, validateCandi
         </div>
       )}
 
-      {pendingLargeSweep && (
+      {pendingLargeExactSweep && (
         <div className="flex flex-col gap-1.5 px-3 py-2 border-b border-amber-400/30 bg-amber-500/10 text-[11px] text-amber-100 shrink-0">
           <div className="flex items-start gap-2">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>
-              Step {pendingLargeSweep.stepDegrees} would require testing an estimated {pendingLargeSweep.estimatedIterations.toLocaleString()} angle
-              combinations, which is over the {MAX_ANGLE_GRID_ITERATIONS.toLocaleString()}-combination safety limit and could take a very long time.
-              {!scopeToView && ' Zoom into the area you care about and enable "Scope to current view" to sweep only that region at this step.'}
+              Step {pendingLargeExactSweep.stepDegrees} would require testing an estimated {pendingLargeExactSweep.estimatedIterations.toLocaleString()} angle
+              combinations in exact mode, which is over the {MAX_ANGLE_GRID_ITERATIONS.toLocaleString()}-combination safety limit and could take a very long time.
             </span>
           </div>
           <div className="flex gap-2 pl-5">
-            <button type="button" onClick={confirmLargeSweep} className="bg-amber-400/20 hover:bg-amber-400/30 text-amber-100 px-2.5 py-1 rounded-md font-bold">
+            <button type="button" onClick={confirmLargeExactSweep} className="bg-amber-400/20 hover:bg-amber-400/30 text-amber-100 px-2.5 py-1 rounded-md font-bold">
               Generate Anyway
             </button>
-            <button type="button" onClick={() => setPendingLargeSweep(null)} className="bg-[#101820]/95 hover:bg-[#172230] text-slate-200 px-2.5 py-1 rounded-md font-bold">
+            <button type="button" onClick={() => setPendingLargeExactSweep(null)} className="bg-[#101820]/95 hover:bg-[#172230] text-slate-200 px-2.5 py-1 rounded-md font-bold">
               Cancel (use a larger step)
             </button>
           </div>
@@ -287,7 +445,17 @@ export default function AnglePlotWindow({ angleParams, baseLength, validateCandi
 
       {/* Graph. */}
       <div className="flex-1 min-h-0 min-w-0 p-3">
-        <AnglePlotPanel ref={panelRef} points={points} currentPoint={currentPoint} theme={theme} isLocked={isViewLocked} displayScale={displayScale} />
+        <AnglePlotPanel
+          ref={panelRef}
+          points={points}
+          currentPoint={currentPoint}
+          theme={theme}
+          isLocked={isViewLocked}
+          displayScale={displayScale}
+          onViewChange={handleViewChange}
+          gridStepDegrees={renderInfo?.gridStepDegrees}
+          userStepDegrees={liveParsedStep.valid ? liveParsedStep.stepDegrees : renderInfo?.userStepDegrees}
+        />
       </div>
 
       {/* Resize grip. */}

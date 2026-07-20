@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseAngleStep, estimateAngleGridIterations, displayScaleForStep, computeSweepRange, MAX_ANGLE_GRID_ITERATIONS } from '../src/anglePlot/angleStep.js';
+import { parseAngleStep, estimateAngleGridIterations, displayScaleForStep, computeSweepRange, isExactModeStep, MAX_ANGLE_GRID_ITERATIONS } from '../src/anglePlot/angleStep.js';
 
 test('parseAngleStep accepts whole numbers with scale 0', () => {
   const result = parseAngleStep('1');
@@ -110,4 +110,29 @@ test('computeSweepRange with no viewBounds imposes no extra B bound', () => {
   const range = computeSweepRange(scale, stepUnits, undefined);
   assert.equal(range.minBUnits, null);
   assert.equal(range.maxBUnitsCap, null);
+});
+
+test('isExactModeStep selects exact mode for 0.1 and coarser', () => {
+  for (const stepText of ['10', '5', '1', '0.5', '0.1']) {
+    const { scale, stepUnits } = parseAngleStep(stepText);
+    assert.equal(isExactModeStep(scale, stepUnits), true, `expected step ${stepText} to select exact mode`);
+  }
+});
+
+test('isExactModeStep selects adaptive mode below 0.1', () => {
+  for (const stepText of ['0.09', '0.01', '0.001', '0.0000003']) {
+    const { scale, stepUnits } = parseAngleStep(stepText);
+    assert.equal(isExactModeStep(scale, stepUnits), false, `expected step ${stepText} to select adaptive mode`);
+  }
+});
+
+test('isExactModeStep compares exactly at the 0.1 boundary regardless of decimal representation', () => {
+  // "0.10" and "0.1" must compare exactly equal to the threshold despite
+  // having different scale/stepUnits representations (scale 2/10n vs scale
+  // 1/1n) — this is exactly the case a naive floating-point >= 0.1 compare
+  // could get wrong.
+  const a = parseAngleStep('0.1');
+  const b = parseAngleStep('0.10');
+  assert.equal(isExactModeStep(a.scale, a.stepUnits), true);
+  assert.equal(isExactModeStep(b.scale, b.stepUnits), true);
 });

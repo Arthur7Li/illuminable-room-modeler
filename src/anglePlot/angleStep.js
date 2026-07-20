@@ -29,6 +29,29 @@
 // as one named constant so it is easy to find and retune later.
 export const MAX_ANGLE_GRID_ITERATIONS = 2_000_000;
 
+// Angle Steps at or above this use exact brute-force generation (every real
+// grid point, full domain, cached until the step/constraints actually
+// change); steps below it use adaptive visible-region sampling. Expressed
+// as scale/stepUnits (0.1 = scale 1, stepUnits 1n) so the comparison below
+// can use exact BigInt cross-multiplication instead of comparing floating
+// point degree values, which would risk a step typed as "0.1" comparing
+// unequal to the binary-float 0.1 the naive `>= 0.1` check would use.
+export const EXACT_MODE_STEP_THRESHOLD = { scale: 1, stepUnits: 1n };
+
+/**
+ * True when the given Angle Step (scale/stepUnits from parseAngleStep) is
+ * at or above EXACT_MODE_STEP_THRESHOLD (0.1), using exact BigInt
+ * cross-multiplication rather than a binary-float `>=` comparison:
+ * stepUnits/10^scale >= thresholdUnits/10^thresholdScale
+ *   <=>  stepUnits * 10^thresholdScale >= thresholdUnits * 10^scale
+ */
+export const isExactModeStep = (scale, stepUnits) => {
+  const { scale: thresholdScale, stepUnits: thresholdUnits } = EXACT_MODE_STEP_THRESHOLD;
+  const left = stepUnits * (10n ** BigInt(thresholdScale));
+  const right = thresholdUnits * (10n ** BigInt(scale));
+  return left >= right;
+};
+
 const PLAIN_DECIMAL_PATTERN = /^\d+(\.\d+)?$/;
 
 /**
