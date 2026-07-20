@@ -27,12 +27,26 @@ import { isValidAnglePair, ANGLE_EPSILON_DEGREES } from './angleValidation.js';
 import { computeSweepRange } from './angleStep.js';
 import {
   MAX_CANDIDATES_PER_CELL, MAX_VISIBLE_RENDER_POINTS, VIEW_PRELOAD_MARGIN_STEPS, POINT_DEDUP_PIXEL_SPACING,
-  DEBUG_ADAPTIVE_RENDERING, calculateSamplingStride, isWithinRenderCell,
+  MAX_ADAPTIVE_RENDER_MS, DEBUG_ADAPTIVE_RENDERING, calculateSamplingStride, isWithinRenderCell,
 } from './renderSamplingPolicy.js';
 
 const yieldToEventLoop = () => new Promise((resolve) => setTimeout(resolve, 0));
 const CELL_TIME_BUDGET_MS = 12;
 const MIN_CELLS_PER_CHUNK = 50;
+// Strides below this test only the exact cell center (see the ringLimit
+// comment in generateVisibleAnglePoints for why); at or above it, cells
+// search their neighbors too — up to MAX_CANDIDATES_PER_CELL regardless of
+// how large ringLimit itself is, so enabling ring search at all is a binary
+// ~9x cost jump per cell, not a gradual one. A live test found that jump
+// reintroduces the same performance cliff at any threshold low enough to
+// matter for a typical zoomed-out view over a thin/sparse valid region, so
+// this is set high enough that the vast majority of the practical zoom
+// range uses the fast single-candidate test; the OCCUPANCY/DENSE blur (see
+// AnglePlotPanel.jsx) already smooths over the resulting minor gaps
+// visually, which is an acceptable trade per this feature's explicit
+// "even if it isn't totally accurate" requirement. Retune if profiling
+// shows a different validator cost than the one this was measured against.
+const RING_SEARCH_MIN_STRIDE = 100;
 const MAX_CELLS_PER_CHUNK = 4000;
 
 /**
@@ -113,7 +127,12 @@ export const dedupPointsByCell = (points, cellSizeA, cellSizeB) => {
  * @param {number} options.zoomLevel - diagnostic-only (DEBUG_ADAPTIVE_RENDERING logging); does not affect stride selection, since viewBounds/viewportSize already fully determine it (see calculateSamplingStride's own comment).
  * @param {{a:number,b:number}} [options.excludePoint] - typically the current orange A/B pair; suppressed from the blue point list so the two markers never coincide.
  * @param {(progress: {cellsChecked:number, found:number, done:boolean, cancelled:boolean}) => void} [options.onProgress]
- * @returns {{ promise: Promise<{points:{a:number,b:number}[], effectiveStepDegrees:number, stride:number, budgetLimited:boolean, cellsChecked:number, candidatesTested:number, durationMs:number}>, cancel: () => void }}
+ * @returns {{ promise: Promise<{points:{a:number,b:number}[], effectiveStepDegrees:number, stride:number, budgetLimited:boolean, timeLimited:boolean, cellsChecked:number, candidatesTested:number, durationMs:number}>, cancel: () => void }}
+ *   `timeLimited` is true when MAX_ADAPTIVE_RENDER_MS was hit before every
+ *   cell in the budget could be checked — the cell-count budget
+ *   (MAX_VISIBLE_SAMPLE_CELLS) assumes a typical validateCandidate cost;
+ *   this is the hard backstop for views where that assumption doesn't hold
+ *   (see MAX_ADAPTIVE_RENDER_MS's own comment for a live example).
  */
 export const generateVisibleAnglePoints = ({
   validateCandidate, baseLength, scale, stepUnits: userStepUnits, viewBounds, viewportSize, zoomLevel, excludePoint, onProgress,
@@ -141,12 +160,27 @@ export const generateVisibleAnglePoints = ({
   const { limitUnits, startAUnits, endAUnits, minBUnits, maxBUnitsCap } = computeSweepRange(scale, effectiveStepUnits, paddedBounds);
 
   // How far (in the user's exact grid units) the per-cell search is allowed
-  // to range from a coarse cell's center — roughly half the coarse cell, so
-  // neighboring cells' searches don't redundantly cover the same ground.
-  // At stride 1 this still searches ring 1 (the immediate 8 neighbors),
-  // which is harmless overlap with neighboring cells' own searches, not a
-  // correctness issue — it just makes single-precision cells extra robust.
-  const ringLimit = Math.max(1, Math.min(6, Math.round(stride / 2)));
+  // to range from a coarse cell's center. Ring search (testing neighbors,
+  // not just the exact center) exists to catch a valid point that's inside
+  // a cell but not at its exact center — but it costs up to
+  // MAX_CANDIDATES_PER_CELL validateCandidate calls per cell instead of 1,
+  // and a live test found that cost cliff dominates real-world performance
+  // for this app: at stride 1 ("the cell" is already one exact grid point,
+  // so ring search there was pure redundant re-testing of neighbors other
+  // iterations already cover) it cut throughput from ~16k-26k checks/sec to
+  // ~1.7k/sec; at stride 2-3, ring search made a view that renders fine at
+  // stride 1 turn into one that hits MAX_ADAPTIVE_RENDER_MS with zero
+  // points found, because most cells outside the (typically thin) valid
+  // region exhaust the full ring before giving up.
+  //
+  // RING_SEARCH_MIN_STRIDE draws the line: below it, test only the exact
+  // cell center (matches generateAngleRegion.js's exact sweep — no
+  // redundancy, no cliff); at or above it, cells are coarse enough that
+  // ring search's boundary-catching value is worth its cost, and a coarse
+  // cell missing a thin feature is a smaller fraction of what's on screen
+  // anyway. This trades a small amount of boundary accuracy at small-to-
+  // medium strides for a large, measured performance win.
+  const ringLimit = stride >= RING_SEARCH_MIN_STRIDE ? Math.max(1, Math.min(6, Math.round(stride / 2))) : 0;
 
   const dedupCellA = POINT_DEDUP_PIXEL_SPACING / Math.max(viewportSize.width, 1) * (viewBounds.maxA - viewBounds.minA || 1);
   const dedupCellB = POINT_DEDUP_PIXEL_SPACING / Math.max(viewportSize.height, 1) * (viewBounds.maxB - viewBounds.minB || 1);
@@ -159,6 +193,7 @@ export const generateVisibleAnglePoints = ({
     let chunkTarget = MIN_CELLS_PER_CHUNK;
     let sinceYield = 0;
     let chunkStart = performance.now();
+    let timeLimited = false;
 
     outer: for (let aUnits = startAUnits; aUnits <= endAUnits; aUnits += effectiveStepUnits) {
       const domainBMaxUnits = limitUnits - aUnits;
@@ -181,6 +216,14 @@ export const generateVisibleAnglePoints = ({
           onProgress?.({ cellsChecked, found: points.length, done: false, cancelled: false });
           await yieldToEventLoop();
           if (cancelled) break outer;
+          // Hard wall-clock backstop: whatever the actual per-cell cost
+          // turns out to be for this particular view, never keep searching
+          // past MAX_ADAPTIVE_RENDER_MS. See that constant's comment for
+          // why the cell-count budget alone isn't sufficient.
+          if (performance.now() - startedAt > MAX_ADAPTIVE_RENDER_MS) {
+            timeLimited = true;
+            break outer;
+          }
           if (elapsedMs > 0) {
             const rescaled = Math.round(chunkTarget * (CELL_TIME_BUDGET_MS / elapsedMs));
             chunkTarget = Math.min(MAX_CELLS_PER_CHUNK, Math.max(MIN_CELLS_PER_CHUNK, rescaled));
@@ -212,14 +255,14 @@ export const generateVisibleAnglePoints = ({
     if (DEBUG_ADAPTIVE_RENDERING) {
       // eslint-disable-next-line no-console
       console.log('[AdaptiveRender]', {
-        zoomLevel, effectiveStepDegrees, requestedStepDegrees, stride, desiredStride, budgetLimited,
+        zoomLevel, effectiveStepDegrees, requestedStepDegrees, stride, desiredStride, budgetLimited, timeLimited,
         viewportSize, cellsChecked, candidatesTested, pointsDrawn: result.length, durationMs: Math.round(durationMs), cancelled,
       });
     }
 
     onProgress?.({ cellsChecked, found: result.length, done: true, cancelled });
     return {
-      points: result, effectiveStepDegrees, requestedStepDegrees, stride, budgetLimited,
+      points: result, effectiveStepDegrees, requestedStepDegrees, stride, budgetLimited, timeLimited,
       cellsChecked, candidatesTested, durationMs,
     };
   })();

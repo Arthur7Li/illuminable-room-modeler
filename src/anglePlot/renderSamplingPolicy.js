@@ -82,6 +82,19 @@ export const MAX_CANDIDATES_PER_CELL = 9;
 // window recommended for interactive debouncing.
 export const RENDER_DEBOUNCE_MS = 200;
 
+// Hard wall-clock cap on a single adaptive render, independent of
+// MAX_VISIBLE_SAMPLE_CELLS. The cell budget assumes a validateCandidate
+// throughput measured from one profiling run (~16k-26k checks/sec); a live
+// test found a view where nearly every cell exhausted its full
+// MAX_CANDIDATES_PER_CELL search without finding a valid point, at closer
+// to ~200 cells/sec (~1,800 validateCandidate calls/sec) — at that rate,
+// MAX_VISIBLE_SAMPLE_CELLS alone would let a single render run for many
+// minutes. This is the actual responsiveness guarantee: whatever the
+// per-candidate cost turns out to be for a given view, generateVisibleAnglePoints
+// stops checking further cells once this much wall-clock time has elapsed
+// and returns whatever it found so far (see the `timeLimited` result flag).
+export const MAX_ADAPTIVE_RENDER_MS = 6000;
+
 // Preload margin, expressed in effective render steps rather than a raw
 // degree value, so points don't visibly pop in/out right at the viewport
 // edge during a pan that hasn't triggered a new render yet.

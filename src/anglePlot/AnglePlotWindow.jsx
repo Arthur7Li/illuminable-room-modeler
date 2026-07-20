@@ -154,7 +154,8 @@ export default function AnglePlotWindow({ angleParams, baseLength, validateCandi
         mode: 'adaptive', zoomLevel: viewState.zoomLevel, userStepDegrees: parsed.stepDegrees,
         gridStepDegrees: result.effectiveStepDegrees, requestedStepDegrees: result.requestedStepDegrees,
         displayScale: displayScaleForStep(parsed.scale),
-        pointCount: result.points.length, durationMs: performance.now() - startedAt, budgetLimited: result.budgetLimited,
+        pointCount: result.points.length, durationMs: performance.now() - startedAt,
+        budgetLimited: result.budgetLimited, timeLimited: result.timeLimited,
       });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -308,8 +309,15 @@ export default function AnglePlotWindow({ angleParams, baseLength, validateCandi
       statusLine = `Exact · Step ${formatAngleDegrees(renderInfo.gridStepDegrees, scale)}° · ${renderInfo.pointCount.toLocaleString()} point${renderInfo.pointCount === 1 ? '' : 's'}`;
     } else {
       const budgetNote = renderInfo.budgetLimited ? ' · budget limited' : '';
-      statusLine = `Adaptive · Zoom ${renderInfo.zoomLevel.toFixed(2)}× · User step ${formatAngleDegrees(renderInfo.userStepDegrees, scale)}° · Render step ${formatAngleDegrees(renderInfo.gridStepDegrees, scale)}° · ${renderInfo.pointCount.toLocaleString()} point${renderInfo.pointCount === 1 ? '' : 's'}${budgetNote}`;
-      statusTitle = renderInfo.budgetLimited
+      // timeLimited (MAX_ADAPTIVE_RENDER_MS) is the more serious of the two
+      // caps: it means the render was cut off before covering its whole
+      // budgeted area, so the result may be an incomplete partial view, not
+      // just a coarser-than-ideal one — worth a visibly different label.
+      const timeNote = renderInfo.timeLimited ? ' · stopped early (partial)' : '';
+      statusLine = `Adaptive · Zoom ${renderInfo.zoomLevel.toFixed(2)}× · User step ${formatAngleDegrees(renderInfo.userStepDegrees, scale)}° · Render step ${formatAngleDegrees(renderInfo.gridStepDegrees, scale)}° · ${renderInfo.pointCount.toLocaleString()} point${renderInfo.pointCount === 1 ? '' : 's'}${budgetNote}${timeNote}`;
+      statusTitle = renderInfo.timeLimited
+        ? `Render was stopped after taking too long for this view and may not cover the whole visible area — try zooming in or panning to a smaller region.`
+        : renderInfo.budgetLimited
         ? `Requested render step: ${formatAngleDegrees(renderInfo.requestedStepDegrees, scale)}° · Applied: ${formatAngleDegrees(renderInfo.gridStepDegrees, scale)}° · Reason: sample-cell budget exceeded for this view`
         : statusLine;
     }

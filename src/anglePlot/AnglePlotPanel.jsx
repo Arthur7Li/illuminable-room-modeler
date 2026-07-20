@@ -19,10 +19,30 @@ const MIN_ZOOM = 2;
 const WHEEL_ZOOM_FACTOR = 1.15;
 const POINT_HIT_RADIUS_PX = 7;
 // Individual-point marker radius used in POINTS mode (see pickRenderMode
-// below) — the "normal" size referenced throughout this file, including for
-// the orange current-point marker, which always uses this radius regardless
-// of which mode the blue region is currently drawn in.
+// below) — the "normal" size at that zoom level. DENSE and OCCUPANCY modes
+// compute their own, smaller marker size instead (see the draw effect):
+// this fixed radius is only right when points are sparse enough to draw as
+// distinguishable individual dots in the first place.
 const POINT_RADIUS_PX = 2.4;
+// Softens OCCUPANCY mode's small filled squares into a smooth-edged blob
+// instead of a jagged pixel staircase. Deliberately not applied to POINTS/
+// DENSE mode — at those zoom levels the individual samples are still
+// meaningful to look at, so they stay crisp; OCCUPANCY only exists once
+// samples are sub-pixel-dense anyway, where the exact boundary shape is no
+// longer meaningfully visible point-by-point regardless of blur.
+//
+// Only applied once cells are at least OCCUPANCY_BLUR_MIN_CELL_PX wide, and
+// scaled down (never up) from there. At the low end of OCCUPANCY mode, cells
+// are already close to a single device pixel — a fixed 2.5px blur applied
+// there doesn't smooth a staircase (there isn't one visible yet), it just
+// spreads each real, distinct point's mark several pixels past its own
+// footprint. With many real points near each other, those spread marks stack
+// into one shapeless blob that hides the actual (often thin/curved) region
+// boundary instead of revealing it — exactly the zoomed-out blurriness this
+// LOD mode exists to avoid. Scaling blur to the cell size keeps it doing
+// only the smoothing job it's for.
+const OCCUPANCY_BLUR_PX = 2.5;
+const OCCUPANCY_BLUR_MIN_CELL_PX = 4;
 
 // The view "Reset View" restores — a fixed overview of the whole permitted
 // triangle, independent of whatever is currently plotted. Also used as the
@@ -279,26 +299,50 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
     // exact-mode result at low zoom and a dense adaptive result at high
     // zoom both pick the mode that actually matches what's distinguishable
     // on screen right now. See the RENDER_MODE comment above.
+    //
+    // `orangeRadius` tracks whatever marker size the current mode is
+    // actually using for blue points, instead of always POINT_RADIUS_PX:
+    // once zoomed out into DENSE/OCCUPANCY territory, samples can be just a
+    // pixel or two apart, and a fixed ~2.4px-radius (4.8px) orange dot would
+    // dwarf that texture — visibly blotting out the very region shape it's
+    // supposed to sit on top of. Matching it to the current mode's marker
+    // size keeps it "the same size as a blue point" in every mode, per the
+    // original design intent, rather than one fixed size that only made
+    // sense for POINTS mode.
     const projectedSpacingPx = Number.isFinite(gridStepDegrees) && gridStepDegrees > 0 ? gridStepDegrees * zoom : Infinity;
     const mode = pickRenderMode(projectedSpacingPx);
     ctx.fillStyle = palette.point;
+    let orangeRadius = POINT_RADIUS_PX;
     if (mode === RENDER_MODE.OCCUPANCY) {
       // Filled squares sized to the sampling cell (with a hair of overlap
       // so pixel rounding never leaves a one-pixel crack between
       // neighbors), not large circles over a coarse grid — a solid raster
       // built only from cells that actually contain a real valid point.
+      // Blurred afterward (see OCCUPANCY_BLUR_PX) so the hard grid-aligned
+      // edges of that raster read as one smooth region instead of a jagged
+      // pixel staircase — a display smoothing pass over real occupied
+      // cells, not fabricated data.
       const cellPx = Math.min(MAX_CELL_SIZE_PX, Math.max(MIN_CELL_SIZE_PX, projectedSpacingPx));
       const half = cellPx / 2 + 0.5;
+      orangeRadius = Math.max(1, cellPx / 2);
+      // See OCCUPANCY_BLUR_MIN_CELL_PX above: below that cell size, skip
+      // blur entirely so each real point stays a crisp, individually
+      // positioned mark instead of dissolving into a shared blob.
+      const blurPx = cellPx >= OCCUPANCY_BLUR_MIN_CELL_PX ? Math.min(OCCUPANCY_BLUR_PX, cellPx * 0.4) : 0;
+      ctx.save();
+      if (blurPx > 0) ctx.filter = `blur(${blurPx}px)`;
       points.forEach((p) => {
         const x = toScreenX(p.a);
         const y = toScreenY(p.b);
         if (x < -half || x > size.width + half || y < -half || y > size.height + half) return;
         ctx.fillRect(x - half, y - half, cellPx + 1, cellPx + 1);
       });
+      ctx.restore();
     } else if (mode === RENDER_MODE.DENSE) {
       // Markers sized to touch/slightly overlap their neighbors instead of
       // leaving the fixed small POINTS-mode radius floating in visible gaps.
       const radius = Math.min(MAX_CELL_SIZE_PX / 2, Math.max(MIN_CELL_SIZE_PX / 2, projectedSpacingPx / 2 + 0.5));
+      orangeRadius = radius;
       points.forEach((p) => {
         const x = toScreenX(p.a);
         const y = toScreenY(p.b);
@@ -318,16 +362,17 @@ const AnglePlotPanel = forwardRef(function AnglePlotPanel({ points, currentPoint
       });
     }
 
-    // Currently committed A/B pair: always the normal individual-point
-    // radius (never enlarged/shrunk by the region's current LOD mode) and
-    // always drawn after the blue region so it is never hidden inside an
-    // occupancy cell — only the orange fill color sets it apart.
+    // Currently committed A/B pair: sized to match whatever the current LOD
+    // mode is using for blue points (see orangeRadius above), always drawn
+    // sharp (no blur, even in OCCUPANCY mode — ctx.filter was already reset
+    // by ctx.restore() above) and after the blue region so it's never
+    // hidden inside it — only the orange fill color sets it apart.
     if (currentPoint) {
       const x = toScreenX(currentPoint.a);
       const y = toScreenY(currentPoint.b);
       ctx.fillStyle = '#f97316';
       ctx.beginPath();
-      ctx.arc(x, y, POINT_RADIUS_PX, 0, Math.PI * 2);
+      ctx.arc(x, y, orangeRadius, 0, Math.PI * 2);
       ctx.fill();
     }
 

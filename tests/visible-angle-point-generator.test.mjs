@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { generateVisibleAnglePoints, findValidPointInCell, dedupPointsByCell } from '../src/anglePlot/visibleAnglePointGenerator.js';
-import { isWithinRenderCell } from '../src/anglePlot/renderSamplingPolicy.js';
+import { isWithinRenderCell, MAX_ADAPTIVE_RENDER_MS } from '../src/anglePlot/renderSamplingPolicy.js';
 import { parseAngleStep } from '../src/anglePlot/angleStep.js';
 import { OBTUSE_THIRD_ANGLE_LIMIT_DEGREES, ANGLE_EPSILON_DEGREES } from '../src/anglePlot/angleValidation.js';
 
@@ -58,6 +58,36 @@ test('generateVisibleAnglePoints stays within a bounded number of cells regardle
   // view-bound rectangle shape (not a perfect square) without hardcoding
   // the exact budget here.
   assert.ok(cellsChecked < 250_000, `expected a bounded cell count even for a 0.0000003 Angle Step, got ${cellsChecked}`);
+});
+
+test('generateVisibleAnglePoints stops within MAX_ADAPTIVE_RENDER_MS even when every candidate is expensive and invalid', async () => {
+  // Reproduces a live regression: a view where nearly every cell exhausted
+  // its full MAX_CANDIDATES_PER_CELL search without finding a valid point
+  // measured at ~200 cells/sec (vs. the ~16k-26k/sec the cell-count budget
+  // assumed), which would have let MAX_VISIBLE_SAMPLE_CELLS alone run for
+  // many minutes. A slow-and-always-invalid validator forces that same
+  // worst case here so the wall-clock cap's actual behavior is exercised,
+  // not just assumed. This test is inherently slow (it has to let
+  // MAX_ADAPTIVE_RENDER_MS actually elapse) — that cost buys confidence in
+  // a real responsiveness guarantee.
+  const slowRejectAll = () => {
+    const until = performance.now() + 1; // ~1ms of busy-work per candidate
+    while (performance.now() < until) { /* spin */ }
+    return { allowed: false };
+  };
+  const fineStep = parseAngleStep('0.0001');
+  const start = performance.now();
+  const result = await generateVisibleAnglePoints({
+    validateCandidate: slowRejectAll, baseLength: 10, scale: fineStep.scale, stepUnits: fineStep.stepUnits,
+    viewBounds: { minA: 1, maxA: 89, minB: 1, maxB: 89 }, viewportSize: { width: 2000, height: 2000 }, zoomLevel: 1,
+  }).promise;
+  const wallClockMs = performance.now() - start;
+
+  assert.equal(result.timeLimited, true, 'expected the render to report it was cut short by the time cap');
+  assert.equal(result.points.length, 0, 'the slow validator rejects everything, so no points should be found');
+  // Generous slack for the chunk that was already in flight when the cap
+  // was checked, plus dedup/cleanup after the loop breaks.
+  assert.ok(wallClockMs < MAX_ADAPTIVE_RENDER_MS * 2.5, `expected total duration (${wallClockMs}ms) to stay well within a small multiple of MAX_ADAPTIVE_RENDER_MS (${MAX_ADAPTIVE_RENDER_MS}ms), not run away`);
 });
 
 test('generateVisibleAnglePoints excludes a point coincident with excludePoint', async () => {
