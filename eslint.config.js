@@ -28,5 +28,9 @@ export default defineConfig([
       globals: globals.browser,
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
+    // Rest-sibling destructuring (`const { drop, ...rest } = obj`) is the
+    // idiomatic way to omit a key before passing the remainder along; the
+    // dropped binding is never meant to be read.
+    rules: { 'no-unused-vars': ['error', { ignoreRestSiblings: true }] },
   },
 ])

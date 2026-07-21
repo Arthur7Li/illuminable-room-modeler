@@ -253,7 +253,6 @@ export const generateVisibleAnglePoints = ({
 
     const durationMs = performance.now() - startedAt;
     if (DEBUG_ADAPTIVE_RENDERING) {
-      // eslint-disable-next-line no-console
       console.log('[AdaptiveRender]', {
         zoomLevel, effectiveStepDegrees, requestedStepDegrees, stride, desiredStride, budgetLimited, timeLimited,
         viewportSize, cellsChecked, candidatesTested, pointsDrawn: result.length, durationMs: Math.round(durationMs), cancelled,

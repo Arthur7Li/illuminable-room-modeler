@@ -2531,28 +2531,20 @@ export default function App() {
                 });
               })()}
 
-              {/* Dynamic Annotation Engine (Proximity Hover & Vertex Coloring) */}
-              {(() => {
+              {/* Dynamic Annotation Engine (Proximity Hover & Vertex Coloring).
+                  Persistent Labels (showAllLabels) intentionally still shows
+                  every vertex + edge-midpoint label of every triangle. A
+                  plain hover (no Persistent Labels) instead shows only the
+                  single nearest vertex under the cursor, not the whole
+                  triangle's vertices and edge midpoints. */}
+              {showAllLabels && (() => {
                 const labelsToRender = [];
                 const renderedCoords = new Set();
                 const renderedMidpoints = new Set();
 
                 const processTriangles = (triangles, isDerived) => {
                   for (const tri of triangles) {
-                    let triHovered = showAllLabels;
-                    
-                    if (!triHovered && !isDragging) {
-                      for (const p of tri.points) {
-                        const cx = toSvgX(p.x); 
-                        const cy = toSvgY(p.y); 
-                        if ((cx - mousePos.x)**2 + (cy - mousePos.y)**2 < 900) {
-                          triHovered = true;
-                          break;
-                        }
-                      }
-                    }
-
-                    if (triHovered) {
+                    {
                       const triDisplayColor = isDerived ? getTriangleRenderStyle(tri).color : themePalette.baseTriangle;
 
                       // 1. Vertex Coordinates Annotation
@@ -2642,8 +2634,67 @@ export default function App() {
                 // Same trailing look-ahead triangle excluded above: it has no drawn
                 // polygon, so it should not produce hover annotations either.
                 processTriangles(visibleActiveTriangles, true);
-                
+
                 return labelsToRender;
+              })()}
+
+              {/* Plain hover (Persistent Labels off): show only the single
+                  nearest vertex's coordinate under the cursor instead of the
+                  whole triangle's vertices and edge midpoints. */}
+              {!showAllLabels && !isDragging && (() => {
+                let nearest = null;
+                let nearestDistSq = 900; // 30px hit radius, matches the persistent-mode threshold above.
+
+                const considerTriangles = (triangles, isDerived) => {
+                  for (const tri of triangles) {
+                    for (let i = 0; i < 3; i++) {
+                      const p = tri.points[i];
+                      const cx = toSvgX(p.x);
+                      const cy = toSvgY(p.y);
+                      const distSq = (cx - mousePos.x) ** 2 + (cy - mousePos.y) ** 2;
+                      if (distSq < nearestDistSq) {
+                        nearestDistSq = distSq;
+                        nearest = { tri, isDerived, index: i, cx, cy, p };
+                      }
+                    }
+                  }
+                };
+                considerTriangles([baseTriangle], false);
+                considerTriangles(visibleActiveTriangles, true);
+                if (!nearest) return null;
+
+                const { tri, isDerived, index, cx, cy, p } = nearest;
+                const triDisplayColor = isDerived ? getTriangleRenderStyle(tri).color : themePalette.baseTriangle;
+                const vertexName = ['A', 'B', 'C'][index];
+
+                // Dynamic vertex coloring logic based on the all-vertex tower validator.
+                let vColor = triDisplayColor;
+                let vertexRadius = isDerived ? 4 : 5;
+                if (simulatorMode === 'code' && activeTriangles.length > 0) {
+                  const symbol = labelsMap[index];
+                  const clearancePointValidation = getClearancePointValidation(tri.id, index, symbol);
+                  if (clearancePointValidation) {
+                    vColor = getShotVertexRenderColor(clearancePointValidation, isDerived ? tri.color : themePalette.baseTriangle);
+                    vertexRadius = clearancePointValidation.valid ? vertexRadius : 6;
+                  }
+                }
+
+                return (
+                  <g key={`lbl-${isDerived ? 'derived-' : ''}${tri.id}-${index}`}>
+                    <circle cx={cx} cy={cy} r={vertexRadius} fill={vColor} opacity={1} />
+                    <text
+                      x={cx + 8}
+                      y={cy - 6}
+                      fill={vColor}
+                      fontSize="11"
+                      fontWeight="700"
+                      className="font-mono tracking-tight"
+                      style={{ textShadow: `0 0 5px ${themePalette.labelHalo}, 0 0 5px ${themePalette.labelHalo}, 0 0 8px ${themePalette.labelHalo}` }}
+                    >
+                      {vertexName}: ({formatPoint(p)})
+                    </text>
+                  </g>
+                );
               })()}
             </g>
           </svg>
