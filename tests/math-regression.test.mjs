@@ -19,6 +19,7 @@ globalThis.__unfolderMathApi = {
   findStableRegion,
   getAngleAtVertex,
   getGlobalAngle,
+  getRenderableActiveTriangles,
   getSymbolAngleValues,
   getSymbolAngleDegreesFromTriangle,
   reflectPoint,
@@ -140,6 +141,16 @@ test('default code unfolding has the known symbolic mapping and side path', () =
   assertAlmostEqual(symbolAngles.z, 115, 1e-10, 'symbol angle z');
 });
 
+test('rendering includes the final reflected triangle instead of treating it as look-ahead geometry', () => {
+  const { codeData } = buildDefaultCodeData();
+  const renderableTriangles = api.getRenderableActiveTriangles(codeData.triangles);
+
+  assert.equal(renderableTriangles.length, codeData.triangles.length);
+  assert.equal(renderableTriangles.length, codeData.parsedSequence.reduce((total, step) => total + step.count, 0));
+  assert.strictEqual(renderableTriangles.at(-1), codeData.triangles.at(-1));
+  assert.equal(renderableTriangles.at(-1).id, 'Code-T37');
+});
+
 test('symbolic angle conversion round-trips through the current physical label map', () => {
   const { codeData } = buildDefaultCodeData();
   const symbols = api.getSymbolAngleValues(DEFAULT_ANGLE_PARAMS, codeData.idxToAngle);
@@ -153,7 +164,7 @@ test('symbolic angle conversion round-trips through the current physical label m
   assertAlmostEqual(Number(rebuilt.length), 10, 1e-12, 'rebuilt length');
 });
 
-test('default shot validator checks every A/B/C occurrence and accepts the known valid sample', () => {
+test('default shot validator excludes endpoint coordinates from line validity and accepts the known valid sample', () => {
   const { baseTriangle, codeData } = buildDefaultCodeData();
   const validation = api.buildPoolshotTowerValidation({
     simulatorMode: 'code',
@@ -179,6 +190,46 @@ test('default shot validator checks every A/B/C occurrence and accepts the known
   assertAlmostEqual(validation.stats.fanMaxCentralAngle, 150, 1e-9, 'max fan angle');
   assertAlmostEqual(validation.stats.lineMargin, 0.27988321468051813, 1e-10, 'line margin');
   assert.equal(validation.violations.length, 0);
+
+  const endpointClassifications = [...validation.byOccurrence.values()].filter(classification => classification.isShotEndpoint);
+  assert.equal(endpointClassifications.length, validation.stats.endpoints);
+  assert.ok(endpointClassifications.every(classification => classification.valid));
+  assert.ok(endpointClassifications.every(classification => Math.abs(classification.score) <= 1e-8));
+  assert.equal(
+    validation.stats.blue + validation.stats.red + validation.stats.uncolored + validation.stats.endpoints,
+    validation.checked
+  );
+});
+
+test('terminal endpoint tower-role conflicts do not invalidate an otherwise valid line', () => {
+  const endpointConflictCodes = [
+    '2 4 2 10 2 6 2 9 1 2',
+    '3 1 9 2 6 2 10 2 4 1'
+  ];
+
+  for (const billiardsCode of endpointConflictCodes) {
+    const baseTriangle = api.buildBaseTriangle('angles', [], { a: 13, b: 50, length: 10 });
+    const codeData = api.unfoldCodeData(billiardsCode, baseTriangle, true);
+    const validation = api.buildPoolshotTowerValidation({
+      simulatorMode: 'code',
+      baseTriangle,
+      activeTriangles: codeData.triangles,
+      labelsMap: codeData.idxToAngle,
+      reflectionEdges: codeData.reflectionEdges,
+      parsedSequence: codeData.parsedSequence,
+      clearanceEpsilon: api.DEFAULT_CLEARANCE_EPSILON
+    });
+
+    assert.equal(validation.status, 'valid', billiardsCode);
+    assert.equal(validation.stats.invalid, 0, billiardsCode);
+    assert.equal(validation.violations.length, 0, billiardsCode);
+    assert.ok(
+      [...validation.byOccurrence.values()]
+        .filter(classification => classification.isShotEndpoint)
+        .every(classification => classification.valid),
+      billiardsCode
+    );
+  }
 });
 
 test('direct blue/black y-line predicate rejects known invalid angle perturbations before rendering', () => {
