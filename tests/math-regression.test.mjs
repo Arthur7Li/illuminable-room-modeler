@@ -13,6 +13,7 @@ globalThis.__unfolderMathApi = {
   buildAngleParamsFromSymbolValues,
   buildBaseTriangle,
   buildCodePathConsistencyValidation,
+  buildRayModeData,
   buildCodePathReference,
   buildFanConstraintValidation,
   buildPoolshotTowerValidation,
@@ -158,6 +159,44 @@ test('rendering includes the final reflected triangle instead of treating it as 
   assert.equal(renderableTriangles.length, codeData.parsedSequence.reduce((total, step) => total + step.count, 0));
   assert.strictEqual(renderableTriangles.at(-1), codeData.triangles.at(-1));
   assert.equal(renderableTriangles.at(-1).id, 'Code-T37');
+});
+
+test('ray mode keeps the terminal reflected triangle when the path ends at the origin after the last bounce', () => {
+  const baseTriangle = api.buildBaseTriangle('angles', [], { a: 45, b: 45, length: 10 });
+  const rayData = api.buildRayModeData({
+    baseTriangle,
+    rayStartVertex: 0,
+    rayAngle: 45,
+    maxBounces: 5,
+    svgSize: { width: 1000, height: 1000 },
+    zoom: 1
+  });
+
+  assert.ok(rayData.triangles.length >= 1);
+  assert.match(rayData.triangles.at(-1).id, /^Ray-T\d+$/);
+  const terminalPoints = rayData.triangles.at(-1).points.map(point => ({ x: point.x, y: point.y }));
+  assert.equal(terminalPoints[1].x, 10);
+  assert.equal(terminalPoints[1].y, 0);
+  assert.ok(Math.abs(terminalPoints[0].x - 10) < 1e-9 || Math.abs(terminalPoints[0].x - 0) < 1e-9);
+  assert.ok(Math.abs(terminalPoints[2].x - 15) < 1e-9 || Math.abs(terminalPoints[2].x + 10) < 1e-9);
+});
+
+test('ray mode resolves rounded vertex hits toward the forward unfolded triangle', () => {
+  const { baseTriangle, codeData } = buildDefaultCodeData();
+  const rayData = api.buildRayModeData({
+    baseTriangle,
+    rayStartVertex: 0,
+    // This is the displayed default code-shot angle, rounded to 12 decimals.
+    rayAngle: 3.105204803654,
+    maxBounces: 50,
+    svgSize: { width: 1000, height: 1000 },
+    zoom: 1
+  });
+
+  assert.equal(rayData.triangles.length, codeData.triangles.length);
+  rayData.triangles.at(-1).points.forEach((point, index) => {
+    assertPointAlmostEqual(point, codeData.triangles.at(-1).points[index], 1e-9, `terminal point ${index}`);
+  });
 });
 
 test('symbolic angle conversion round-trips through the current physical label map', () => {
